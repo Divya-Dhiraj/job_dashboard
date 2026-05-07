@@ -421,6 +421,28 @@ function openApplyDialog(jobId) {
   `;
   $('applyDialogOverlay').classList.add('open');
   document.body.style.overflow = 'hidden';
+
+  // If the user has multiple resumes on file, surface the picker dropdown.
+  // Default selection is "" → backend auto-picks the best match. Single-
+  // resume profiles never see this row (it stays hidden).
+  populateResumePicker();
+}
+
+async function populateResumePicker() {
+  const row = $('applyDialogResumeRow');
+  const sel = $('applyDialogResume');
+  if (!row || !sel) return;
+  try {
+    const r = await fetch('/api/resumes', { credentials: 'same-origin' });
+    if (!r.ok) { row.style.display = 'none'; return; }
+    const { resumes = [] } = await r.json();
+    if (resumes.length <= 1) { row.style.display = 'none'; return; }
+    sel.innerHTML = '<option value="">Auto-pick (recommended)</option>' +
+      resumes.map(rs => `<option value="${rs.id}">${esc(rs.label)}${rs.is_default ? ' (default)' : ''}</option>`).join('');
+    row.style.display = '';
+  } catch {
+    row.style.display = 'none';
+  }
 }
 
 function closeApplyDialog() {
@@ -443,10 +465,14 @@ async function handleGenerate() {
     // who don't touch the radio get the original behaviour.
     const langRadio = document.querySelector('input[name="applyDialogLang"]:checked');
     const language  = langRadio ? langRadio.value : 'en';
+    // resumeId="" → backend auto-picks best match. Otherwise the user
+    // chose a specific resume from the picker dropdown.
+    const resumeSel = $('applyDialogResume');
+    const resumeId  = resumeSel && resumeSel.value ? +resumeSel.value : null;
     const res = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId: job.id, language }),
+      body: JSON.stringify({ jobId: job.id, language, resumeId }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -455,7 +481,10 @@ async function handleGenerate() {
     const data = await res.json();
     $('generatingOverlay').classList.remove('open');
     openPreviewModal(data.id, job);
-    showToast('CV and Cover Letter generated successfully!');
+    const resumeNote = data.resume_used
+      ? ` Used ${data.resume_used.auto ? 'auto-picked' : 'selected'} resume "${data.resume_used.label}".`
+      : '';
+    showToast(`CV and Cover Letter generated.${resumeNote}`);
   } catch (err) {
     $('generatingOverlay').classList.remove('open');
     document.body.style.overflow = '';
@@ -624,11 +653,22 @@ async function handleEdit(target) {
       const err = await res.json();
       throw new Error(err.error || 'Edit failed');
     }
+    const result = await res.json().catch(() => ({}));
 
     // Reload the active-language PDF so the user sees the edit applied.
     loadPreviewPdfs();
     $(inputId).value = '';
-    showToast(`${target === 'cv' ? 'CV' : 'Cover Letter'} updated!`);
+    // Surface what actually changed — Claude is asked to declare its scope
+    // so the user can verify the edit wasn't broader than intended.
+    const changes = Array.isArray(result.changes) ? result.changes : [];
+    if (changes.length > 0) {
+      const summary = changes.length === 1
+        ? changes[0]
+        : `${changes.length} changes: ${changes.slice(0, 3).join(' · ')}${changes.length > 3 ? ' …' : ''}`;
+      showToast(`${target === 'cv' ? 'CV' : 'Cover Letter'} updated — ${summary}`);
+    } else {
+      showToast(`${target === 'cv' ? 'CV' : 'Cover Letter'} updated.`);
+    }
   } catch (err) {
     showToast('Edit failed: ' + err.message, true);
   } finally {

@@ -979,6 +979,34 @@ a:hover { text-decoration: underline; }
 .resume-status.err  { color: #fca5a5; }
 .resume-status.busy { color: #c4b5fd; }
 
+.resume-library {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid #1e293b; border-radius: 8px;
+  background: rgba(30, 41, 59, 0.35);
+  padding: 8px; margin-bottom: 4px;
+}
+.resume-card {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px 12px;
+  padding: 10px 12px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid #1e293b; border-radius: 6px;
+}
+.resume-card.is-default {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.18);
+}
+.resume-card .rc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.resume-card .rc-label { font-weight: 600; font-size: 14px; color: #e2e8f0; }
+.resume-card .rc-default-badge {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px;
+  background: #4338ca; color: #ede9fe;
+}
+.resume-card .rc-summary { font-size: 12px; color: #cbd5e1; line-height: 1.5; }
+.resume-card .rc-meta { font-size: 11px; color: #94a3b8; }
+.resume-card .rc-actions { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+.resume-card .rc-actions .btn { padding: 4px 10px; font-size: 12px; }
+
 /* ─────────────────────────────────────────
    Bullet editor — click a bullet → see alternatives
    ───────────────────────────────────────── */

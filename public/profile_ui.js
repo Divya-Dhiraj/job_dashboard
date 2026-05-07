@@ -621,8 +621,129 @@
 
     // Resume controls — show length + bind upload + populate textarea
     initResumeControls(prof);
+    // Multi-resume library — list + upload + default + delete
+    initResumeLibrary();
 
     $('peDelete').style.display = '';
+  }
+
+  // Multi-resume library: render the cards + bind add/delete/default actions.
+  // Backed by /api/resumes endpoints. Designed to live alongside the
+  // single-resume "default resume" controls below it.
+  async function initResumeLibrary() {
+    const list = $('resumeLibrary');
+    if (!list) return;
+
+    async function refresh() {
+      try {
+        const { resumes } = await api('/api/resumes');
+        renderList(resumes || []);
+      } catch (err) {
+        list.innerHTML = `<div class="modal-sub" style="padding:8px; color:#fca5a5;">Could not load resumes: ${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    function renderList(resumes) {
+      if (!resumes.length) {
+        list.innerHTML = `<div class="modal-sub" style="padding:8px;">No resumes yet — your default resume from Settings will appear here once you upload one.</div>`;
+        return;
+      }
+      list.innerHTML = '';
+      for (const r of resumes) {
+        const card = document.createElement('div');
+        card.className = 'resume-card' + (r.is_default ? ' is-default' : '');
+        const summary = (r.summary && r.summary.trim()) ? r.summary : '(summary will appear shortly — Claude is digesting this resume…)';
+        card.innerHTML = `
+          <div>
+            <div class="rc-head">
+              <span class="rc-label">${escapeHtml(r.label)}</span>
+              ${r.is_default ? '<span class="rc-default-badge">Default</span>' : ''}
+            </div>
+            <div class="rc-summary">${escapeHtml(summary)}</div>
+            <div class="rc-meta">${(r.resume_text_len || 0).toLocaleString()} characters · updated ${new Date(r.updated_at).toLocaleDateString()}</div>
+          </div>
+          <div class="rc-actions">
+            ${r.is_default ? '' : `<button type="button" class="btn btn-secondary" data-act="default" data-id="${r.id}">Set default</button>`}
+            <button type="button" class="btn btn-secondary" data-act="rename" data-id="${r.id}" data-label="${escapeHtml(r.label)}">Rename</button>
+            ${r.is_default ? '' : `<button type="button" class="btn btn-secondary" data-act="delete" data-id="${r.id}" data-label="${escapeHtml(r.label)}" style="color:#fca5a5;">Delete</button>`}
+          </div>`;
+        list.appendChild(card);
+      }
+      // Wire each button
+      list.querySelectorAll('[data-act]').forEach(btn => {
+        btn.onclick = () => onCardAction(btn.dataset.act, +btn.dataset.id, btn.dataset.label);
+      });
+    }
+
+    async function onCardAction(act, id, label) {
+      try {
+        if (act === 'default') {
+          await api(`/api/resumes/${id}/default`, { method: 'POST' });
+          await refresh();
+          if (typeof window.refreshAll === 'function') window.refreshAll();
+        } else if (act === 'rename') {
+          const next = prompt('Rename this resume', label || 'Resume');
+          if (!next || next === label) return;
+          await api(`/api/resumes/${id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: next }),
+          });
+          await refresh();
+        } else if (act === 'delete') {
+          if (!confirm(`Delete "${label}"? This cannot be undone.`)) return;
+          const r = await fetch(`/api/resumes/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            alert(err.error || `Delete failed (${r.status})`);
+            return;
+          }
+          await refresh();
+        }
+      } catch (err) {
+        alert('Action failed: ' + err.message);
+      }
+    }
+
+    // Add-resume controls
+    const fileBtn = $('resumeLibUploadBtn');
+    const fileInput = $('resumeLibFile');
+    const labelInput = $('resumeLibLabel');
+    const status = $('resumeLibStatus');
+    if (fileBtn && !fileBtn.dataset.bound) {
+      fileBtn.onclick = () => fileInput.click();
+      fileInput.onchange = async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        const label = (labelInput.value || '').trim() || f.name.replace(/\.[^.]+$/, '');
+        status.className = 'resume-status busy';
+        status.textContent = `Adding "${label}" (${Math.round(f.size/1024)} KB)…`;
+        try {
+          const fd = new FormData();
+          fd.append('resume', f);
+          fd.append('label', label);
+          const r = await fetch('/api/resumes', { method: 'POST', body: fd, credentials: 'same-origin' });
+          if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+          status.className = 'resume-status ok';
+          status.textContent = `✓ Added "${label}". Claude is now writing a one-line summary in the background.`;
+          labelInput.value = '';
+          await refresh();
+        } catch (err) {
+          status.className = 'resume-status err';
+          status.textContent = '✗ ' + err.message;
+        } finally {
+          fileInput.value = '';
+        }
+      };
+      fileBtn.dataset.bound = '1';
+    }
+
+    await refresh();
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // ─────────────────────────────

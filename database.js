@@ -22,6 +22,7 @@ async function getDb() {
   }
   initSchema();
   migrateLegacyData();
+  migrateLegacyResumesIntoTable();
   // Brain tables (idempotent — safe on every boot). Lazy-required to avoid
   // a circular dependency at module load.
   try {
@@ -114,6 +115,22 @@ function initSchema() {
       notes             TEXT,
       created_at        TEXT NOT NULL
     );
+    -- One profile can store many tailored resumes (e.g. "Tech CV", "Marketing CV").
+    -- profile.resume_text is kept as a denormalized mirror of whichever row
+    -- has is_default=1, so the matcher / brain / legacy callers don't need
+    -- to be retrofitted. summary is a Claude-generated 2-sentence digest
+    -- used when ranking which resume to use for a given job.
+    CREATE TABLE IF NOT EXISTS profile_resumes (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id   INTEGER NOT NULL,
+      label        TEXT NOT NULL DEFAULT 'Default',
+      resume_text  TEXT NOT NULL,
+      summary      TEXT DEFAULT '',
+      is_default   INTEGER DEFAULT 0,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS profile_resumes_by_profile ON profile_resumes(profile_id);
   `);
 
   // Lightweight column-add migrations for existing DBs that predate profile_id.
@@ -217,6 +234,31 @@ function initSchema() {
   } catch (e) {
     try { db.run('ROLLBACK'); } catch {}
     console.warn('[DB] jobs PK migration:', e.message);
+  }
+}
+
+// One-time migration: every profile that already has resume_text but no
+// profile_resumes rows gets one row created from that text. Idempotent.
+function migrateLegacyResumesIntoTable() {
+  try {
+    const profilesWithResume = allQuery(
+      `SELECT p.id, p.resume_text FROM profiles p
+       WHERE p.resume_text IS NOT NULL AND p.resume_text <> ''
+         AND NOT EXISTS (SELECT 1 FROM profile_resumes pr WHERE pr.profile_id = p.id)`
+    );
+    if (profilesWithResume.length === 0) return;
+    const now = new Date().toISOString();
+    for (const p of profilesWithResume) {
+      db.run(
+        `INSERT INTO profile_resumes (profile_id, label, resume_text, summary, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        [p.id, 'Default', p.resume_text, '', now, now]
+      );
+    }
+    save();
+    console.log(`[DB] Migrated ${profilesWithResume.length} legacy resume(s) into profile_resumes table.`);
+  } catch (e) {
+    console.warn('[DB] migrateLegacyResumesIntoTable failed:', e.message);
   }
 }
 
@@ -416,6 +458,20 @@ function createProfile(profile) {
   const created = getProfileBySlug(slug);
   // Auto-activate if this is the only profile
   if (listProfiles().length === 1) setSetting('active_profile_id', String(created.id));
+  // Seed the first row into profile_resumes so the Settings library shows
+  // the freshly-uploaded resume immediately (without waiting for the boot-time
+  // migration that only catches existing-but-unmigrated profiles).
+  if (profile.resume_text && profile.resume_text.trim()) {
+    try {
+      const now = new Date().toISOString();
+      db.run(
+        `INSERT INTO profile_resumes (profile_id, label, resume_text, summary, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?)`,
+        [created.id, 'Default', profile.resume_text, '', now, now]
+      );
+      save();
+    } catch (e) { console.warn('[DB] seed profile_resumes failed:', e.message); }
+  }
   return created;
 }
 
@@ -447,6 +503,27 @@ function updateProfile(id, fields) {
   if (!sets.length) return getProfile(id);
   params.push(id);
   db.run(`UPDATE profiles SET ${sets.join(', ')} WHERE id = ?`, params);
+  // Keep profile_resumes default row in sync with the mirror. If the legacy
+  // "replace default resume" path updates profiles.resume_text directly, we
+  // need the default library row to reflect it (and vice-versa later when
+  // setDefaultResume runs).
+  if ('resume_text' in fields) {
+    try {
+      const def = getDefaultResume(id);
+      const now = new Date().toISOString();
+      if (def) {
+        db.run('UPDATE profile_resumes SET resume_text = ?, updated_at = ? WHERE id = ?',
+          [String(fields.resume_text || ''), now, def.id]);
+      } else if (fields.resume_text && String(fields.resume_text).trim()) {
+        // No library row yet — seed one as the new default.
+        db.run(
+          `INSERT INTO profile_resumes (profile_id, label, resume_text, summary, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+          [id, 'Default', String(fields.resume_text), '', now, now]
+        );
+      }
+    } catch (e) { console.warn('[DB] keep profile_resumes in sync failed:', e.message); }
+  }
   save();
   return getProfile(id);
 }
@@ -638,6 +715,135 @@ function getJobById(id, profileId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Multi-resume CRUD (profile-scoped)
+//
+// Design notes:
+// - profiles.resume_text is kept in sync with whichever profile_resumes row
+//   has is_default=1. Existing matcher / brain code reads profile.resume_text
+//   directly — keeping the mirror saves us a wide refactor.
+// - "Default" resume is what gets used if the user generates a CV without
+//   triggering the auto-picker (or only has one resume to begin with).
+// - Deleting the default resume promotes the most-recently-updated other
+//   row to default. If there's only one resume, it can't be deleted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function listResumes(profileId) {
+  if (!profileId) return [];
+  return allQuery(
+    `SELECT id, profile_id, label, summary, is_default, created_at, updated_at,
+            length(resume_text) AS resume_text_len
+     FROM profile_resumes
+     WHERE profile_id = ?
+     ORDER BY is_default DESC, updated_at DESC`,
+    [profileId]
+  );
+}
+
+function getResumeById(id, profileId) {
+  if (!id || !profileId) return null;
+  return getQuery(
+    'SELECT * FROM profile_resumes WHERE id = ? AND profile_id = ?',
+    [id, profileId]
+  );
+}
+
+function getDefaultResume(profileId) {
+  if (!profileId) return null;
+  return getQuery(
+    `SELECT * FROM profile_resumes
+     WHERE profile_id = ? AND is_default = 1
+     ORDER BY updated_at DESC LIMIT 1`,
+    [profileId]
+  );
+}
+
+function _syncProfileResumeMirror(profileId) {
+  // Mirror the current default resume's text onto profiles.resume_text so
+  // legacy readers (matcher.js, brain.js) keep working without retrofitting.
+  const def = getDefaultResume(profileId);
+  if (!def) return;
+  db.run('UPDATE profiles SET resume_text = ? WHERE id = ?', [def.resume_text, profileId]);
+}
+
+function addResume(profileId, { label, resume_text, summary, makeDefault = false } = {}) {
+  if (!profileId) throw new Error('addResume requires profileId');
+  if (!resume_text || !resume_text.trim()) throw new Error('resume_text is required');
+  const now = new Date().toISOString();
+  const cleanLabel = String(label || '').trim() || 'Untitled';
+  // First resume on a profile is automatically the default, regardless of flag.
+  const existingCount = (getQuery('SELECT COUNT(*) AS c FROM profile_resumes WHERE profile_id = ?', [profileId]) || {}).c || 0;
+  const willBeDefault = (existingCount === 0) || makeDefault;
+  if (willBeDefault) {
+    db.run('UPDATE profile_resumes SET is_default = 0 WHERE profile_id = ?', [profileId]);
+  }
+  db.run(
+    `INSERT INTO profile_resumes (profile_id, label, resume_text, summary, is_default, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [profileId, cleanLabel, resume_text, summary || '', willBeDefault ? 1 : 0, now, now]
+  );
+  let id = null;
+  const stmt = db.prepare('SELECT last_insert_rowid() AS id');
+  if (stmt.step()) id = stmt.getAsObject().id;
+  stmt.free();
+  if (willBeDefault) _syncProfileResumeMirror(profileId);
+  save();
+  return getResumeById(id, profileId);
+}
+
+function updateResume(id, profileId, fields = {}) {
+  if (!id || !profileId) throw new Error('updateResume requires id + profileId');
+  const allowed = ['label', 'resume_text', 'summary'];
+  const sets = []; const params = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (!allowed.includes(k)) continue;
+    sets.push(`${k} = ?`); params.push(v == null ? null : String(v));
+  }
+  if (!sets.length) return getResumeById(id, profileId);
+  sets.push('updated_at = ?'); params.push(new Date().toISOString());
+  params.push(id, profileId);
+  db.run(`UPDATE profile_resumes SET ${sets.join(', ')} WHERE id = ? AND profile_id = ?`, params);
+  // If the default's text changed, refresh the mirror.
+  const row = getResumeById(id, profileId);
+  if (row?.is_default) _syncProfileResumeMirror(profileId);
+  save();
+  return row;
+}
+
+function setDefaultResume(id, profileId) {
+  if (!id || !profileId) throw new Error('setDefaultResume requires id + profileId');
+  const row = getResumeById(id, profileId);
+  if (!row) throw new Error('Resume not found');
+  db.run('UPDATE profile_resumes SET is_default = 0 WHERE profile_id = ?', [profileId]);
+  db.run('UPDATE profile_resumes SET is_default = 1, updated_at = ? WHERE id = ?',
+    [new Date().toISOString(), id]);
+  _syncProfileResumeMirror(profileId);
+  save();
+  return getResumeById(id, profileId);
+}
+
+function deleteResume(id, profileId) {
+  if (!id || !profileId) throw new Error('deleteResume requires id + profileId');
+  const row = getResumeById(id, profileId);
+  if (!row) return false;
+  const remaining = (getQuery('SELECT COUNT(*) AS c FROM profile_resumes WHERE profile_id = ?', [profileId]) || {}).c || 0;
+  if (remaining <= 1) throw new Error('Cannot delete the only remaining resume');
+  db.run('DELETE FROM profile_resumes WHERE id = ? AND profile_id = ?', [id, profileId]);
+  if (row.is_default) {
+    // Promote the most-recently-updated remaining resume to default.
+    const next = getQuery(
+      `SELECT id FROM profile_resumes WHERE profile_id = ? ORDER BY updated_at DESC LIMIT 1`,
+      [profileId]
+    );
+    if (next) {
+      db.run('UPDATE profile_resumes SET is_default = 1 WHERE id = ?', [next.id]);
+      _syncProfileResumeMirror(profileId);
+    }
+  }
+  save();
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Raw exec helpers used by brain_db.js. These run arbitrary SQL against the
 // shared sql.js database and persist via save(). Kept here so all writes
 // funnel through one save() path and the DB stays internally consistent.
@@ -674,6 +880,8 @@ module.exports = {
   upsertJob, getJobs, getStats, markNotificationSent, wasNotificationSent, logScrape, getTimeline,
   // applications
   createApplication, getApplications, getApplicationById, updateApplication, markAsApplied, getJobById,
+  // resumes (per profile)
+  listResumes, getResumeById, getDefaultResume, addResume, updateResume, setDefaultResume, deleteResume,
   // brain raw access (used by brain_db.js)
   brainExec, brainExecReturningId, brainAll, brainOne,
 };

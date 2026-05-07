@@ -52,11 +52,137 @@ function requireActiveProfile() {
   return p;
 }
 
-// Load the candidate's resume text from the active profile (no more resume.txt).
-function loadResume(profile) {
+// Load the candidate's resume text. Default behavior is to use the
+// profile's default resume (mirrored on profile.resume_text). Pass a
+// resumeRow to use a specific resume from the profile_resumes table.
+function loadResume(profile, resumeRow = null) {
+  if (resumeRow && resumeRow.resume_text) return resumeRow.resume_text;
   const p = profile || requireActiveProfile();
   if (!p.resume_text) throw new Error(`Profile "${p.name}" has no resume_text saved`);
   return p.resume_text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-resume auto-picker
+//
+// When a profile has more than one stored resume (Tech CV vs Marketing CV
+// vs Internal Recruiter CV), we ask Claude to score them against the JD
+// and return the best match. The picker only sees each resume's SUMMARY
+// (a one-paragraph Claude-generated digest) — we never paste full resumes
+// into the picker prompt because that would cost ~10x more tokens for a
+// trivial decision.
+//
+// If the profile only has one resume, we skip the Claude call entirely
+// and return that resume.
+// ─────────────────────────────────────────────────────────────────────────────
+async function pickResumeForJob(profile, job, { explicitResumeId = null } = {}) {
+  const profileId = profile && profile.id;
+  if (!profileId) throw new Error('pickResumeForJob requires a profile with an id');
+
+  // Explicit override beats everything.
+  if (explicitResumeId) {
+    const row = db.getResumeById(explicitResumeId, profileId);
+    if (row) return { resume: row, reasoning: 'User-selected resume.', auto: false };
+  }
+
+  const all = db.listResumes(profileId);
+  // No resumes yet — fall back to legacy profile.resume_text. This keeps
+  // signups that haven't migrated yet working until the user uploads.
+  if (all.length === 0) {
+    if (profile.resume_text) {
+      return { resume: { id: null, label: 'Default', resume_text: profile.resume_text }, reasoning: 'Single-resume profile.', auto: false };
+    }
+    throw new Error('Profile has no resume on file');
+  }
+
+  // Single resume — skip the picker and return it.
+  if (all.length === 1) {
+    const only = db.getResumeById(all[0].id, profileId);
+    return { resume: only, reasoning: 'Only one resume on file.', auto: false };
+  }
+
+  // Multi-resume — ask Claude to rank. Backfill any missing summaries
+  // first (one Claude call per resume, but only the first time the picker
+  // ever runs against a freshly-migrated library).
+  const missingSummary = all.filter(r => !r.summary || !r.summary.trim());
+  if (missingSummary.length) {
+    console.log(`[Generator] Backfilling ${missingSummary.length} resume summary/summaries before picker...`);
+    await Promise.all(missingSummary.map(async r => {
+      const full = db.getResumeById(r.id, profileId);
+      if (!full) return;
+      const summary = await summarizeResume(full.resume_text, profile);
+      if (summary) {
+        db.updateResume(r.id, profileId, { summary });
+        r.summary = summary;
+      }
+    }));
+  }
+  const summaries = all.map((r, idx) => `[${idx + 1}] id=${r.id} label="${r.label}"
+${r.summary || '(no summary on file)'}`).join('\n\n');
+
+  const sys = `You match a job description against a candidate's resume library and pick the best fit.
+
+You will see N resume summaries (one paragraph each, with id and label) and a job listing. Pick the SINGLE best resume to tailor for this job.
+
+Output ONLY valid JSON, no markdown fences:
+{"id": <number, the id field of the best resume>, "reasoning": "<one short sentence why this resume fits this job better than the others>"}
+
+Pick by ROLE / INDUSTRY relevance first, then by skill stack. If two summaries are equally relevant, prefer the one whose label is the closer industry match. If everything ties, pick the most recently updated.`;
+
+  const user = `Job listing:
+Title: ${job.title || ''}
+Company: ${job.company || ''}
+Location: ${job.location || ''}
+Description (truncated):
+${(job.description || '').slice(0, 3500)}
+
+Resume library:
+${summaries}
+
+Pick the best resume now.`;
+
+  const client = getClient(profile);
+  const response = await client.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 400,
+    system: cached(sys),
+    messages: [{ role: 'user', content: user }],
+  });
+  const raw = response.content[0]?.text || '';
+  const m = raw.match(/\{[\s\S]*\}/);
+  let parsed = null;
+  if (m) { try { parsed = JSON.parse(m[0]); } catch {} }
+  const pickedId = parsed?.id;
+  let row = null;
+  if (pickedId) row = db.getResumeById(pickedId, profileId);
+  // Fallback: the default if Claude returned an unrecognized id.
+  if (!row) row = db.getDefaultResume(profileId) || db.getResumeById(all[0].id, profileId);
+  return {
+    resume: row,
+    reasoning: parsed?.reasoning || 'Auto-picked best match.',
+    auto: true,
+  };
+}
+
+// Generate a 2-sentence Claude summary of a resume for use by the picker.
+// Caching this on upload (one Claude call per resume) means we never have
+// to re-summarize during pick-time, which keeps the picker fast.
+async function summarizeResume(resumeText, profile = null) {
+  if (!resumeText || !resumeText.trim()) return '';
+  const sys = `Summarize a candidate's resume in two short sentences for use by a job-matching picker. Output only the summary, no preamble. Sentence 1: their primary role + years + industry. Sentence 2: their strongest skill stack and any specialty (German market, B2B SaaS, fintech, etc.). 35 words max total. No first-person voice.`;
+  try {
+    const client = getClient(profile);
+    const r = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      system: cached(sys),
+      messages: [{ role: 'user', content: `Resume:\n\n${resumeText.slice(0, 12000)}\n\nSummarize now.` }],
+    });
+    return (r.content[0]?.text || '').trim();
+  } catch (e) {
+    console.warn('[Generator] summarizeResume failed:', e.message);
+    return '';
+  }
 }
 
 function sanitizeFolderName(str) {
@@ -328,17 +454,39 @@ Generate the JSON now. Re-read the absolute writing rules and the self-review ch
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Claude API — regenerate a section with user edit instructions
+//
+// Surgical-edit pipeline: send the current CV / cover letter alongside the
+// instruction, but in a wrapper that asks Claude to also report which
+// fields it touched. After parsing, we re-verify the diff ourselves against
+// the previous version — anything Claude rewrote that wasn't in the
+// touched-fields list is reverted to the original. This pins Claude to
+// the user's intent even when the model is tempted to "improve" untouched
+// prose.
 // ─────────────────────────────────────────────────────────────────────────────
 async function regenerateSection(existingData, target, instruction, resumeText, job, profile) {
   const client = getClient(profile);
-  const section = target === 'cv' ? JSON.stringify(existingData.cv, null, 2) : existingData.coverLetter;
+  const sectionStr = target === 'cv'
+    ? JSON.stringify(existingData.cv, null, 2)
+    : String(existingData.coverLetter || '');
 
-  // Editor inherits the same writing philosophy as the generator. We append
-  // the format-specific instruction so the editor knows whether to emit
-  // updated JSON (CV) or updated text (cover letter).
+  // The wrapper schema forces Claude to declare which fields it changed.
+  // For CV edits the change list is structured (path strings into the JSON);
+  // for cover-letter edits we just take the user's instruction at face value
+  // (the whole text is the editable scope) and rely on the diff after the fact.
   const editSystem = `${EDIT_SYSTEM_PROMPT_PREFIX}
 
-You will receive the current ${target === 'cv' ? 'CV (JSON)' : 'cover letter (text)'} and an edit instruction. Apply the edit while keeping the same format and respecting all original writing rules. Output ONLY the updated ${target === 'cv' ? 'JSON object' : 'cover letter text'}, nothing else.`;
+You will receive the current ${target === 'cv' ? 'CV as JSON' : 'cover letter as plain text'} and an edit instruction.
+
+OUTPUT FORMAT (always — no markdown fences, no commentary):
+{
+  "updated": <the FULL ${target === 'cv' ? 'CV JSON object' : 'cover letter string'} after applying the edit. Untouched fields must be byte-identical to the input.>,
+  "changes": [
+    "<one short sentence per touched field, e.g. 'Shortened bullet 2 of BMW role.' or 'Tightened cover letter paragraph 3.'>"
+  ],
+  "scope": "<one of: 'profileSummary', 'experience.<index>.bullets', 'experience.<index>', 'education', 'skills', 'languages', 'coverLetter.paragraph.<n>', 'coverLetter.tone', 'coverLetter.full', 'name|email|phone|address|linkedin'. Pick the SMALLEST scope that covers the instruction.>"
+}
+
+The "updated" field is the full document, NOT a diff — but only the fields named in "changes" / "scope" should differ from the input.`;
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -346,17 +494,85 @@ You will receive the current ${target === 'cv' ? 'CV (JSON)' : 'cover letter (te
     system: cached(editSystem),
     messages: [{
       role: 'user',
-      content: `Current ${target}:\n${section}\n\nJob: ${job.title} at ${job.company}\nCandidate resume:\n${resumeText}\n\nEdit instruction: ${instruction}\n\nOutput the updated ${target === 'cv' ? 'JSON' : 'text'} now. Re-read the writing rules before emitting.`
+      content: `Current ${target}:
+${sectionStr}
+
+Job: ${job.title} at ${job.company}
+Candidate resume (for grounding — do NOT rewrite to lean on this unless the instruction asks for it):
+${(resumeText || '').slice(0, 6000)}
+
+Edit instruction: ${instruction}
+
+Apply ONLY the requested edit. Leave every other field byte-identical. Output the JSON wrapper now.`
     }],
   });
 
-  const text = response.content[0]?.text || '';
+  const raw = response.content[0]?.text || '';
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Regeneration did not return valid JSON');
+  const parsed = JSON.parse(jsonMatch[0]);
+  if (parsed.updated === undefined) throw new Error('Regeneration response missing "updated" field');
+
+  const changes = Array.isArray(parsed.changes) ? parsed.changes.filter(s => typeof s === 'string') : [];
+  const scope = String(parsed.scope || '').trim();
+
   if (target === 'cv') {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Regeneration did not return valid JSON');
-    return { ...existingData, cv: JSON.parse(jsonMatch[0]) };
+    const updatedCv = parsed.updated;
+    if (!updatedCv || typeof updatedCv !== 'object') throw new Error('Regeneration: updated field is not a CV object');
+    // Enforce surgical edit: revert any field outside the declared scope to
+    // the original. This catches cases where Claude rewrites untouched bullets
+    // even with the strict prompt above.
+    const guarded = enforceSurgicalCvEdit(existingData.cv, updatedCv, scope);
+    return { ...existingData, cv: guarded, _changes: changes, _scope: scope };
   }
-  return { ...existingData, coverLetter: text.trim() };
+  // Cover letter: the "updated" value should be a string. Trust Claude here
+  // since cover-letter edits are usually intentional rewrites.
+  const updatedCl = String(parsed.updated || '').trim();
+  return { ...existingData, coverLetter: updatedCl, _changes: changes, _scope: scope };
+}
+
+// Walk the new CV against the old one, reverting any field whose path is
+// NOT in the declared scope. The scope strings come back from Claude as
+// "experience.0.bullets", "profileSummary", "skills", etc.
+//
+// We're conservative: if the scope is unrecognized or empty, we trust
+// Claude's output (no surgical guard). If the scope is recognized, we
+// allow changes ONLY to fields beneath that path — every other field
+// gets snapped back to the original.
+function enforceSurgicalCvEdit(oldCv, newCv, scope) {
+  if (!scope || scope === 'coverLetter.full' || scope.startsWith('coverLetter.')) {
+    // No CV-side scope declared — return Claude's output as-is.
+    return newCv;
+  }
+  // Build the result by deep-copying the old CV, then overwriting only the
+  // scoped path with the new value.
+  const result = JSON.parse(JSON.stringify(oldCv || {}));
+  const segs = scope.split('.');
+  // Walk into both old and new in lockstep, copying the new branch into the result at the scope.
+  let oldNode = oldCv, newNode = newCv, target = result;
+  for (let i = 0; i < segs.length - 1; i++) {
+    const seg = segs[i];
+    if (newNode == null || target == null) return newCv;     // give up, return Claude's
+    if (Array.isArray(newNode)) {
+      const idx = parseInt(seg, 10);
+      if (!Number.isFinite(idx)) return newCv;
+      newNode = newNode[idx];
+      target  = target[idx];
+      oldNode = oldNode?.[idx];
+    } else {
+      newNode = newNode[seg];
+      target  = target[seg];
+      oldNode = oldNode?.[seg];
+    }
+  }
+  const last = segs[segs.length - 1];
+  if (newNode == null || target == null) return newCv;
+  if (Array.isArray(newNode) && /^\d+$/.test(last)) {
+    target[parseInt(last, 10)] = newNode[parseInt(last, 10)];
+  } else {
+    target[last] = newNode[last];
+  }
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -818,7 +1034,13 @@ async function generateAndSave(job, profile, options = {}) {
   const p = profile || requireActiveProfile();
   // language: 'en' | 'de' | 'both'  (default 'en' — backward-compatible)
   const language = ['en', 'de', 'both'].includes(options.language) ? options.language : 'en';
-  const resumeText = loadResume(p);
+
+  // Resume selection: caller may pass options.resumeId to force a specific
+  // resume from the library; otherwise the picker auto-selects the best
+  // match (or returns the only resume on file when there's just one).
+  const picked = await pickResumeForJob(p, job, { explicitResumeId: options.resumeId || null });
+  const resumeText = loadResume(p, picked.resume);
+  console.log(`[Generator] Resume selected: "${picked.resume?.label || 'Default'}" (${picked.auto ? 'auto' : 'manual'}) — ${picked.reasoning}`);
 
   // ── Brain pre-pass: analyze the JD AND assemble retrieval context ──
   // We run them in parallel. analyzeJobAndCompany is a Claude call (~3-5s).
@@ -902,6 +1124,12 @@ async function generateAndSave(job, profile, options = {}) {
     languages,
     renderedFiles,
     brain: brainAnalysis,
+    resume_used: picked.resume ? {
+      id: picked.resume.id,
+      label: picked.resume.label || 'Default',
+      auto: picked.auto,
+      reasoning: picked.reasoning || '',
+    } : null,
   };
 }
 
@@ -913,7 +1141,9 @@ async function regenerateAndSave(folderPath, target, instruction, job, profile) 
 
   console.log(`[Generator] Regenerating ${target} with instruction: "${instruction.slice(0, 60)}..."`);
   const updatedData = await regenerateSection(existingData, target, instruction, resumeText, job, p);
-  fs.writeFileSync(jsonPath, JSON.stringify(updatedData, null, 2), 'utf-8');
+  // _changes / _scope are runtime metadata for the UI — strip before persisting.
+  const { _changes, _scope, ...persistable } = updatedData;
+  fs.writeFileSync(jsonPath, JSON.stringify(persistable, null, 2), 'utf-8');
 
   if (target === 'cv') {
     const cvDocxName = cvFilenameFor(p, 'docx');
@@ -927,8 +1157,9 @@ async function regenerateAndSave(folderPath, target, instruction, job, profile) 
     await saveAsPdf(coverLetterToHtml(updatedData.coverLetter, job, renderCv, p), path.join(folderPath, coverLetterFilename('pdf')));
   }
 
-  console.log(`[Generator] ${target} regenerated and saved.`);
-  return updatedData;
+  console.log(`[Generator] ${target} regenerated and saved. Scope: ${_scope || '(unspecified)'}; ${(_changes || []).length} change(s).`);
+  // Return the runtime metadata so the API can surface it to the UI.
+  return { ...persistable, changes: _changes || [], scope: _scope || '' };
 }
 
 // Add a translation of an existing application. Reads the saved
@@ -1113,5 +1344,6 @@ module.exports = {
   suggestBulletAlternatives, applyBulletEdit, applyFieldEdit,
   parseRawJobPaste,
   flushRender, renderKeyFor,
+  pickResumeForJob, summarizeResume,
   APPS_DIR, cvFilenameFor, coverLetterFilename,
 };

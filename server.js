@@ -15,8 +15,8 @@ const { scrapeAll, applyProfile: applyScraperProfile, setApifyToken, setLinkedIn
 const { setProfile: setMatcherProfile, scoreJob, getInferredTitles, getResumeKeywords } = require('./matcher');
 const { sendDigestEmail, sendTestEmail, applyMailerSettings } = require('./emailer');
 const db = require('./database');
-const { profileFromUpload } = require('./profile');
-const { generateAndSave, regenerateAndSave, translateExistingApplication, translateCvAndCoverLetter, translateText, suggestBulletAlternatives, applyBulletEdit, applyFieldEdit, parseRawJobPaste, flushRender, renderKeyFor, APPS_DIR, cvFilenameFor, coverLetterFilename } = require('./generator');
+const { profileFromUpload, extractResumeText } = require('./profile');
+const { generateAndSave, regenerateAndSave, translateExistingApplication, translateCvAndCoverLetter, translateText, suggestBulletAlternatives, applyBulletEdit, applyFieldEdit, parseRawJobPaste, flushRender, renderKeyFor, summarizeResume, APPS_DIR, cvFilenameFor, coverLetterFilename } = require('./generator');
 const { listCountries, listPresets } = require('./location');
 const brain = require('./brain');
 const brainDb = require('./brain_db');
@@ -585,6 +585,104 @@ app.get('/api/resume', (req, res) => {
   res.json({ keywords: getResumeKeywords(), titles: getInferredTitles() });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-resume library — list / add / update / delete / set-default.
+// Backed by the profile_resumes table; the default resume is also mirrored
+// onto profiles.resume_text so legacy readers (matcher, brain) keep working.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// List the logged-in profile's resumes (without the full text — that's heavy).
+app.get('/api/resumes', (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  res.json({ resumes: db.listResumes(profile.id) });
+});
+
+// Get a single resume's full text (used by Settings when the user wants to
+// view / edit the actual content).
+app.get('/api/resumes/:id', (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  const row = db.getResumeById(+req.params.id, profile.id);
+  if (!row) return res.status(404).json({ error: 'Resume not found' });
+  res.json({ resume: row });
+});
+
+// Add a new resume — accepts EITHER a multipart file upload (field "resume")
+// OR a JSON body with { label, resume_text }. After insert, kicks off a
+// non-blocking summarize call so the picker has a digest to rank against.
+app.post('/api/resumes', upload.single('resume'), async (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  try {
+    const label = String(req.body?.label || '').trim() || 'Resume';
+    const makeDefault = req.body?.make_default === '1' || req.body?.make_default === true;
+    let resumeText = '';
+    if (req.file) {
+      resumeText = (await extractResumeText(req.file.buffer, req.file.originalname || '')).trim();
+      if (!resumeText) return res.status(400).json({ error: 'Could not extract any text from that file' });
+    } else if (req.body?.resume_text) {
+      resumeText = String(req.body.resume_text).trim();
+    } else {
+      return res.status(400).json({ error: 'Provide either a file upload (field "resume") or a JSON body with resume_text' });
+    }
+    const created = db.addResume(profile.id, { label, resume_text: resumeText, makeDefault });
+
+    // Async: generate the picker-summary in the background. We respond
+    // immediately so the UI feels snappy; the summary lands on a follow-up
+    // refresh of the resumes list.
+    summarizeResume(resumeText, profile)
+      .then(summary => { if (summary) db.updateResume(created.id, profile.id, { summary }); })
+      .catch(e => console.warn('[Resumes] summarize failed:', e.message));
+
+    res.json({ resume: created });
+  } catch (err) {
+    console.error('[Resumes] add error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update a resume's label and/or text. If the text changes we re-summarize.
+app.patch('/api/resumes/:id', async (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  try {
+    const fields = {};
+    if (req.body?.label !== undefined) fields.label = String(req.body.label || '').trim() || 'Resume';
+    if (req.body?.resume_text !== undefined) fields.resume_text = String(req.body.resume_text || '');
+    const updated = db.updateResume(+req.params.id, profile.id, fields);
+    if (!updated) return res.status(404).json({ error: 'Resume not found' });
+    if (fields.resume_text) {
+      summarizeResume(fields.resume_text, profile)
+        .then(summary => { if (summary) db.updateResume(updated.id, profile.id, { summary }); })
+        .catch(e => console.warn('[Resumes] resummarize failed:', e.message));
+    }
+    res.json({ resume: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Promote a resume to the profile default. Mirrors the text onto
+// profiles.resume_text so the matcher / brain pick it up immediately.
+app.post('/api/resumes/:id/default', (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  try {
+    const updated = db.setDefaultResume(+req.params.id, profile.id);
+    res.json({ resume: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a resume. Refuses to delete the only remaining one.
+app.delete('/api/resumes/:id', (req, res) => {
+  const profile = requireProfile(req, res); if (!profile) return;
+  try {
+    const ok = db.deleteResume(+req.params.id, profile.id);
+    if (!ok) return res.status(404).json({ error: 'Resume not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ─────────────────────────────
 // Manual job entry — paste a JD that wasn't found via scraping.
 // Builds a synthetic Job row, runs the same brain analyze + matcher
@@ -682,17 +780,20 @@ app.use('/files', express.static(path.join(__dirname, 'applications')));
 app.post('/api/generate', async (req, res) => {
   const profile = requireProfile(req, res);
   if (!profile) return;
-  const { jobId, language } = req.body;
+  const { jobId, language, resumeId } = req.body;
   if (!jobId) return res.status(400).json({ error: 'jobId is required' });
   // language is optional. When omitted or invalid we fall through to the
   // generator's default of 'en' (preserves backward compatibility).
   const lang = ['en', 'de', 'both'].includes(language) ? language : 'en';
+  // resumeId is optional — when present, the picker uses that resume; when
+  // absent (or null), the picker auto-selects the best match.
+  const explicitResumeId = (resumeId && Number.isFinite(+resumeId)) ? +resumeId : null;
   const job = db.getJobById(jobId, profile.id);
   if (!job) return res.status(404).json({ error: 'Job not found for this profile' });
 
   try {
     applyProfileState(profile);  // ensure matcher + scraper state matches the request's profile
-    const { folderPath, folderName, cvPdfName, data, brain: brainAnalysis, languages } = await generateAndSave(job, profile, { language: lang });
+    const { folderPath, folderName, cvPdfName, data, brain: brainAnalysis, languages, resume_used } = await generateAndSave(job, profile, { language: lang, resumeId: explicitResumeId });
     const appId = db.createApplication({
       profileId:         profile.id,
       job_id:            job.id,
@@ -720,7 +821,7 @@ app.post('/api/generate', async (req, res) => {
       coverLetter:   data.coverLetter,
     }).catch(e => console.warn('[Brain] recordGeneration failed:', e.message));
 
-    res.json({ id: appId, folderName });
+    res.json({ id: appId, folderName, resume_used });
   } catch (err) {
     console.error('[Generate] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -858,7 +959,13 @@ app.post('/api/applications/:id/edit', async (req, res) => {
       try { brain.recordEdit(profile.id, app.id, { target, instruction }); }
       catch (e) { console.warn('[Brain] recordEdit failed:', e.message); }
     }
-    res.json({ success: true, cv: updatedData.cv, coverLetter: updatedData.coverLetter });
+    res.json({
+      success: true,
+      cv: updatedData.cv,
+      coverLetter: updatedData.coverLetter,
+      changes: updatedData.changes || [],
+      scope: updatedData.scope || '',
+    });
   } catch (err) {
     console.error('[Edit] Error:', err.message);
     res.status(500).json({ error: err.message });

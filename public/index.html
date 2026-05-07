@@ -258,6 +258,13 @@
         <label><input type="radio" name="applyDialogLang" value="both" /> 🌍 Both</label>
       </div>
 
+      <div class="apply-dialog-lang" id="applyDialogResumeRow" style="display:none;">
+        <span class="apply-dialog-lang-label">Base resume</span>
+        <select id="applyDialogResume" class="input" style="max-width: 240px;">
+          <option value="">Auto-pick (recommended)</option>
+        </select>
+      </div>
+
       <div class="apply-dialog-actions">
         <button class="btn btn-primary btn-lg" id="applyDialogYes">Yes, Generate</button>
         <button class="btn btn-secondary btn-lg" id="applyDialogNo">No, Just Apply</button>
@@ -662,14 +669,29 @@
         <p class="modal-sub" style="margin: 4px 0 12px;">All your personal information is editable here. Use the wizard for a guided edit (with toggles per field).</p>
         <button class="btn btn-secondary" id="peOpenWizard" style="margin-bottom: 12px;">✏️ Edit full profile in setup wizard →</button>
 
-        <h4 class="settings-subhead">Resume <span class="hint" id="peResumeMeta"></span></h4>
+        <h4 class="settings-subhead">Resume library</h4>
         <p class="modal-sub" style="margin: 4px 0 8px;">
-          Replace your stored resume text. Upload a new PDF / DOCX / TXT and Claude re-parses it (skills,
-          search titles, contact info update automatically). Or edit the raw text below.
+          Store multiple resumes for different roles or industries. When you generate a CV, Claude picks the
+          best-matching one automatically — or you can override the choice on the Generate dialog.
+        </p>
+        <div class="resume-library" id="resumeLibrary">
+          <div class="modal-sub" style="padding: 8px;">Loading…</div>
+        </div>
+        <div class="resume-library-controls" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px;">
+          <input type="file" id="resumeLibFile" accept=".pdf,.docx,.txt" hidden />
+          <input type="text" id="resumeLibLabel" class="input" placeholder='Label (e.g. "Tech CV")' style="max-width: 220px;" />
+          <button type="button" class="btn btn-secondary" id="resumeLibUploadBtn">📄 Add resume…</button>
+          <span class="resume-status" id="resumeLibStatus"></span>
+        </div>
+
+        <h4 class="settings-subhead" style="margin-top: 18px;">Default resume — quick edit <span class="hint" id="peResumeMeta"></span></h4>
+        <p class="modal-sub" style="margin: 4px 0 8px;">
+          Replace your default resume by uploading a new PDF / DOCX / TXT — Claude re-parses skills + titles + contact info.
+          Or tweak the raw text directly. (To manage multiple resumes, use the library above.)
         </p>
         <div class="resume-controls">
           <input type="file" id="peResumeFile" accept=".pdf,.docx,.txt" hidden />
-          <button type="button" class="btn btn-secondary" id="peResumeUploadBtn">📄 Upload new resume…</button>
+          <button type="button" class="btn btn-secondary" id="peResumeUploadBtn">📄 Replace default resume…</button>
           <span class="resume-status" id="peResumeStatus"></span>
         </div>
         <details class="pj-advanced" style="margin-top: 8px;">
