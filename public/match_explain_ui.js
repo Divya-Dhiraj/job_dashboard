@@ -105,26 +105,16 @@
     const body = $('matchExplainBody');
     body.innerHTML = '';
 
-    // Source toggle (app mode only): "Resume" vs "Tailored CV"
-    if (activeMode === 'app') {
-      const tabs = document.createElement('div');
-      tabs.className = 'me-source-tabs';
-      tabs.innerHTML = `
-        <button class="me-source-tab ${activeSource === 'resume' ? 'active' : ''}" data-src="resume">📄 Your resume vs JD</button>
-        <button class="me-source-tab ${activeSource === 'cv' ? 'active' : ''}" data-src="cv">✨ Tailored CV vs JD</button>`;
-      tabs.querySelectorAll('button').forEach(btn => {
-        btn.onclick = () => {
-          activeSource = btn.dataset.src;
-          $('matchExplainBody').innerHTML = '<div class="bullet-popover-loading">Analysing…</div>';
-          load(false);
-        };
-      });
-      body.appendChild(tabs);
-    }
+    // ⚠️ Important: build the rest of the content as ONE HTML string and
+    // insert it via insertAdjacentHTML AFTER appending the tab buttons as
+    // a real DOM node. Using `body.innerHTML += '...'` here would re-parse
+    // the entire body and destroy the click handlers on the tab buttons,
+    // which is exactly the bug that made the tabs feel "not working".
+    const sections = [];
 
     // 1. Summary
     if (data.summary) {
-      body.innerHTML += `<div class="me-section"><div class="me-summary">${escapeHtml(data.summary)}</div></div>`;
+      sections.push(`<div class="me-section"><div class="me-summary">${escapeHtml(data.summary)}</div></div>`);
     }
 
     // 2. Requirements with supporting evidence
@@ -137,7 +127,7 @@
         const supports = req.supported_by || [];
         const supportHtml = supports.length
           ? `<ul>${supports.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>`
-          : `<div class="me-empty">No clear support in the resume — possible gap.</div>`;
+          : `<div class="me-empty">No clear support in the ${activeSource === 'cv' ? 'tailored CV' : 'resume'} — possible gap.</div>`;
         return `
           <div class="me-req">
             <div class="me-req-head">
@@ -147,7 +137,7 @@
             ${supportHtml}
           </div>`;
       }).join('');
-      body.innerHTML += `<div class="me-section"><h3>Requirements ↔ Your CV</h3>${reqsHtml}</div>`;
+      sections.push(`<div class="me-section"><h3>Requirements ↔ Your ${activeSource === 'cv' ? 'CV' : 'Resume'}</h3>${reqsHtml}</div>`);
     }
 
     // 3. Skill matches
@@ -158,17 +148,43 @@
           <span class="me-skill-arrow">→</span>
           ${escapeHtml(m.jd_phrase)}
         </span>`).join('');
-      body.innerHTML += `<div class="me-section"><h3>Skill matches (your CV ↔ JD phrasing)</h3><div class="me-skill-grid">${chips}</div></div>`;
+      sections.push(`<div class="me-section"><h3>Skill matches (your ${activeSource === 'cv' ? 'tailored CV' : 'resume'} ↔ JD phrasing)</h3><div class="me-skill-grid">${chips}</div></div>`);
     }
 
     // 4. Gaps
     if (data.gaps?.length) {
       const chips = data.gaps.map(g => `<span class="me-gap">${escapeHtml(g)}</span>`).join('');
-      body.innerHTML += `<div class="me-section"><h3>Gaps (worth addressing in cover letter)</h3>${chips}</div>`;
+      sections.push(`<div class="me-section"><h3>Gaps (worth addressing in cover letter)</h3>${chips}</div>`);
     }
 
     if (!data.requirements?.length && !data.skill_matches?.length) {
-      body.innerHTML += '<div class="brain-empty">Claude returned no structured data.</div>';
+      sections.push('<div class="brain-empty">Claude returned no structured data.</div>');
+    }
+
+    // Source toggle (app mode only): "Resume" vs "Tailored CV"
+    // Append the tab DOM node FIRST so the rest of the body renders below it.
+    if (activeMode === 'app') {
+      const tabs = document.createElement('div');
+      tabs.className = 'me-source-tabs';
+      tabs.innerHTML = `
+        <button type="button" class="me-source-tab ${activeSource === 'resume' ? 'active' : ''}" data-src="resume">📄 Your resume vs JD</button>
+        <button type="button" class="me-source-tab ${activeSource === 'cv' ? 'active' : ''}" data-src="cv">✨ Tailored CV vs JD</button>`;
+      tabs.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.dataset.src === activeSource) return;     // already on this tab
+          activeSource = btn.dataset.src;
+          $('matchExplainBody').innerHTML = '<div class="bullet-popover-loading">Analysing…</div>';
+          load(false);
+        });
+      });
+      body.appendChild(tabs);
+    }
+
+    // Now insert the analysis HTML AFTER the tabs without going through
+    // body.innerHTML+= — insertAdjacentHTML does NOT touch existing children
+    // so the tab buttons keep their event listeners.
+    if (sections.length) {
+      body.insertAdjacentHTML('beforeend', sections.join(''));
     }
   }
 
