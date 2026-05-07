@@ -384,6 +384,11 @@ function bindEvents() {
   $('editClBtn').addEventListener('click', () => handleEdit('coverLetter'));
   $('previewAppliedCheck').addEventListener('change', e => handleMarkApplied(e.target.checked));
   $('previewOpenLocal').addEventListener('click', handleOpenFolder);
+  $('previewDownloadBtn').addEventListener('click', () => {
+    if (!currentAppId) return;
+    triggerApplicationDownload(currentAppId);
+    showToast('Building ZIP — your download will start in a moment.');
+  });
   $('editCvInput').addEventListener('keydown', e => { if (e.key === 'Enter') handleEdit('cv'); });
   $('editClInput').addEventListener('keydown', e => { if (e.key === 'Enter') handleEdit('coverLetter'); });
 
@@ -484,7 +489,11 @@ async function handleGenerate() {
     const resumeNote = data.resume_used
       ? ` Used ${data.resume_used.auto ? 'auto-picked' : 'selected'} resume "${data.resume_used.label}".`
       : '';
-    showToast(`CV and Cover Letter generated.${resumeNote}`);
+    showToast(`CV and Cover Letter generated.${resumeNote} Downloading ZIP…`);
+    // Auto-trigger a local download so the user has a copy on their laptop
+    // before they close the tab. The server still keeps the files (DB row
+    // points at the folder), so this is belt-and-braces, not the only copy.
+    triggerApplicationDownload(data.id);
   } catch (err) {
     $('generatingOverlay').classList.remove('open');
     document.body.style.overflow = '';
@@ -695,6 +704,28 @@ async function handleOpenFolder() {
   } catch (err) { showToast('Error: ' + err.message, true); }
 }
 
+// Trigger a browser-level download of the application's ZIP bundle.
+// We use a hidden anchor click so the browser handles the actual file
+// save dialog / Downloads-folder write — this works even when the user is
+// running the app from a remote VM.
+async function triggerApplicationDownload(appId) {
+  if (!appId) return;
+  try {
+    const url = `/api/applications/${appId}/download`;
+    // Use an anchor + click — fetch+blob would also work but anchors give
+    // us the server's Content-Disposition filename for free.
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 5000);
+  } catch (err) {
+    showToast('Download failed: ' + err.message, true);
+  }
+}
+window.triggerApplicationDownload = triggerApplicationDownload;
+
 // ─────────────────────────────
 // Applications Tracker
 // ─────────────────────────────
@@ -737,7 +768,10 @@ function renderTracker(apps) {
       <td><span class="status-pill status-${(app.status||'generated').toLowerCase()}">${esc(app.status || 'generated')}</span></td>
       <td><input type="checkbox" class="tracker-check" ${app.applied ? 'checked' : ''} onchange="handleTrackerApply(${app.id}, this.checked)" /></td>
       <td style="font-size:12px;color:var(--text-muted);">${fmtDate(app.created_at)}</td>
-      <td><button class="btn btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="event.stopPropagation(); viewApplication(${app.id})">View</button></td>
+      <td>
+        <button class="btn btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="event.stopPropagation(); viewApplication(${app.id})">View</button>
+        <button class="btn btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="event.stopPropagation(); triggerApplicationDownload(${app.id})" title="Download ZIP">📦</button>
+      </td>
     `;
     tr.addEventListener('click', () => viewApplication(app.id));
     tbody.appendChild(tr);

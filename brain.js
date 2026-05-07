@@ -28,9 +28,13 @@ const Anthropic = require('@anthropic-ai/sdk');
 const db = require('./database');
 const brainDb = require('./brain_db');
 const { embed, embedOne, topK } = require('./embeddings');
+const MODELS = require('./models');
 
-const ANALYZER_MODEL  = 'claude-sonnet-4-20250514';
-const REFLECTOR_MODEL = 'claude-sonnet-4-20250514';
+// Brain tasks (analyze JD + company, post-generation reflection,
+// match-explanation) are structured-extraction work. Haiku handles them
+// well at much lower cost than Sonnet. Override via MODEL_AUXILIARY in .env.
+const ANALYZER_MODEL  = MODELS.auxiliary;
+const REFLECTOR_MODEL = MODELS.auxiliary;
 
 function anthropicClient(profile) {
   const key = (profile && profile.anthropic_key_override)

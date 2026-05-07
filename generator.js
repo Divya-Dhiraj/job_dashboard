@@ -11,6 +11,10 @@ const db = require('./database');
 const brain = require('./brain');
 const { SYSTEM_PROMPT, GERMAN_ADDENDUM, EDIT_SYSTEM_PROMPT_PREFIX, TRANSLATION_SYSTEM_PROMPT, BULLET_REWRITE_SYSTEM_PROMPT, JD_PARSE_SYSTEM_PROMPT } = require('./prompts/cv_generation');
 const templates = require('./templates');
+const MODELS = require('./models');
+// Sonnet stays on the high-stakes prose calls (full generation, surgical
+// edit, bullet rewrites). Everything else (resume picker / summarizer,
+// JD parsing, translation) runs on Haiku via MODELS.auxiliary.
 
 const APPS_DIR = path.join(__dirname, 'applications');
 
@@ -143,7 +147,7 @@ Pick the best resume now.`;
 
   const client = getClient(profile);
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.auxiliary,        // resume picker — Haiku is plenty
     max_tokens: 400,
     system: cached(sys),
     messages: [{ role: 'user', content: user }],
@@ -173,7 +177,7 @@ async function summarizeResume(resumeText, profile = null) {
   try {
     const client = getClient(profile);
     const r = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: MODELS.auxiliary,        // resume summary digest — Haiku
       max_tokens: 200,
       system: cached(sys),
       messages: [{ role: 'user', content: `Resume:\n\n${resumeText.slice(0, 12000)}\n\nSummarize now.` }],
@@ -301,7 +305,7 @@ async function parseRawJobPaste(rawText, profile) {
   if (!rawText || !rawText.trim()) throw new Error('rawText is empty');
   const client = getClient(profile);
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.auxiliary,        // JD paste parser — structured extraction, Haiku
     max_tokens: 4096,
     system: cached(JD_PARSE_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: String(rawText).slice(0, 18000) }],
@@ -338,7 +342,7 @@ async function translateText(text, profile, targetLanguage) {
 - Output ONLY the translated text. No commentary, no quotes around it, no "Here is the translation:" preamble, no markdown fences.`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.auxiliary,        // text translation — Haiku translates competently
     max_tokens: 4096,
     // The translator prompt is small and target-language-specific, but
     // it's the same across calls within a target. Cache it anyway.
@@ -361,7 +365,7 @@ ${JSON.stringify(data, null, 2)}
 
 Output the translated JSON only.`;
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.auxiliary,        // CV/CL JSON translation — Haiku
     max_tokens: 4096,
     system: cached(TRANSLATION_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: userPrompt }],
@@ -396,7 +400,7 @@ ${language === 'de' ? 'Output the 4 alternatives in German (formal Hochdeutsch, 
 Return ONLY a JSON array of 4 strings. No prose around it.`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.generation,       // bullet rewriter — strict writing rules, keep on Sonnet
     max_tokens: 1200,
     system: cached(BULLET_REWRITE_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: userPrompt }],
@@ -440,7 +444,7 @@ Generate the JSON now. Re-read the absolute writing rules and the self-review ch
   }
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.generation,       // main CV + cover letter — Sonnet
     max_tokens: 4096,
     messages: [{ role: 'user', content: userPrompt }],
     system: systemBlocks,
@@ -489,7 +493,7 @@ OUTPUT FORMAT (always — no markdown fences, no commentary):
 The "updated" field is the full document, NOT a diff — but only the fields named in "changes" / "scope" should differ from the input.`;
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: MODELS.generation,       // surgical edit — strict instruction-following, Sonnet
     max_tokens: 4096,
     system: cached(editSystem),
     messages: [{

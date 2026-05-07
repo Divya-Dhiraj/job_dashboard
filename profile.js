@@ -8,8 +8,11 @@
 //      - target_titles (broader list for title-bonus matching)
 // The resulting profile object can be saved via database.createProfile().
 const Anthropic = require('@anthropic-ai/sdk');
+const MODELS = require('./models');
 
-const PROFILE_INFERENCE_MODEL = 'claude-sonnet-4-20250514';
+// Resume → structured profile is a structured-extraction task. Haiku
+// handles it just as well as Sonnet at a fraction of the cost.
+const PROFILE_INFERENCE_MODEL = MODELS.auxiliary;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Resume text extraction

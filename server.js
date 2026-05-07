@@ -942,6 +942,86 @@ function guessCvFileInFolder(folder) {
   } catch { return null; }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bulk download — one ZIP containing CV + cover letter (PDF + DOCX, all
+// languages) plus the job description, in a structured folder layout:
+//
+//   <CompanyName>/<Role>_<YYYY-MM-DD>/
+//     CV_<slug>[_<lang>].pdf
+//     CV_<slug>[_<lang>].docx
+//     Cover_Letter[_<lang>].pdf
+//     Cover_Letter[_<lang>].docx
+//     job_description.txt
+//
+// Used both by the auto-trigger after a fresh generation (so the user has a
+// local copy regardless of server uptime) and by the "Download all" button
+// in the preview modal for re-downloading anytime.
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/applications/:id/download', async (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  // Flush any debounced render so the ZIP captures the latest bytes after
+  // a burst of edits.
+  try { await flushRender(renderKeyFor(app.folder_path, 'en')); } catch {}
+  try { await flushRender(renderKeyFor(app.folder_path, 'de')); } catch {}
+
+  if (!app.folder_path || !fs.existsSync(app.folder_path)) {
+    return res.status(404).json({ error: 'Application folder is missing on disk' });
+  }
+
+  // Build the inside-zip folder path: "<Company>/<Role>_<Date>/"
+  const safe = (s) => String(s || 'unknown')
+    .replace(/[\\/:*?"<>|]+/g, '')   // ZIP-illegal chars
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || 'unknown';
+  const dateStr = (app.created_at || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const innerCompany = safe(app.company);
+  const innerRole    = `${safe(app.role)}_${dateStr}`;
+
+  // Pick all interesting files in the application folder. We include every
+  // CV + Cover_Letter file (handles bilingual outputs), the job description,
+  // and skip the internal generated.json.
+  let entries = [];
+  try {
+    entries = fs.readdirSync(app.folder_path);
+  } catch (e) {
+    return res.status(500).json({ error: 'Could not read application folder: ' + e.message });
+  }
+  const wanted = entries.filter(f =>
+    /^CV_.+\.(pdf|docx)$/i.test(f) ||
+    /^Cover_Letter.*\.(pdf|docx)$/i.test(f) ||
+    f === 'job_description.txt'
+  );
+  if (wanted.length === 0) {
+    return res.status(404).json({ error: 'No deliverable files found in the application folder' });
+  }
+
+  try {
+    const JSZip = require('jszip');
+    const zip = new JSZip();
+    const innerDir = zip.folder(innerCompany).folder(innerRole);
+    for (const f of wanted) {
+      const abs = path.join(app.folder_path, f);
+      const buf = fs.readFileSync(abs);
+      innerDir.file(f, buf);
+    }
+    const buffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+    const downloadName = `${innerCompany}_${innerRole}.zip`.replace(/\s+/g, '_');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err) {
+    console.error('[Download] ZIP build failed:', err);
+    res.status(500).json({ error: 'ZIP build failed: ' + err.message });
+  }
+});
+
 app.post('/api/applications/:id/edit', async (req, res) => {
   const app = db.getApplicationById(+req.params.id);
   if (!app) return res.status(404).json({ error: 'Application not found' });
