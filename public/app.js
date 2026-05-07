@@ -790,27 +790,220 @@ async function handleOpenFolder() {
   } catch (err) { showToast('Error: ' + err.message, true); }
 }
 
-// Trigger a browser-level download of the application's ZIP bundle.
-// We use a hidden anchor click so the browser handles the actual file
-// save dialog / Downloads-folder write — this works even when the user is
-// running the app from a remote VM.
-async function triggerApplicationDownload(appId) {
-  if (!appId) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// Application download / save
+//
+// We support two paths:
+//   1. SAVE TO FOLDER (preferred when available) — uses the File System
+//      Access API to write the files into a real folder on disk that the
+//      user picks once. Subsequent generations write directly into the
+//      same folder without a prompt because the directory handle is
+//      persisted in IndexedDB. Requires Chromium-based browser AND a
+//      secure context (HTTPS or localhost).
+//   2. ZIP DOWNLOAD (universal fallback) — every browser can do this,
+//      single .zip file lands in the Downloads folder.
+//
+// The user can flip between modes via the Recent / preview UI: there's a
+// dedicated "Save to folder…" action plus the existing 📦 Download button.
+// Auto-trigger after a fresh Generate uses whichever mode is currently
+// selected (default: try folder-save if a handle exists, else ZIP).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FOLDER_DB_NAME = 'jobDashboardFsHandles';
+const FOLDER_KEY = 'rootDir';
+const PREF_KEY = 'jobDashboard:saveMode:v1';   // 'folder' | 'zip'
+
+// localStorage flag of the user's preferred save mode. Defaults to 'folder'
+// when the API is supported, 'zip' otherwise.
+function getSaveMode() {
+  const v = localStorage.getItem(PREF_KEY);
+  if (v === 'folder' || v === 'zip') return v;
+  return canSaveToFolder() ? 'folder' : 'zip';
+}
+function setSaveMode(mode) {
+  if (mode === 'folder' || mode === 'zip') localStorage.setItem(PREF_KEY, mode);
+}
+
+function canSaveToFolder() {
+  // showDirectoryPicker exists on Chromium (Chrome, Edge, Brave) and only
+  // in secure contexts (HTTPS or localhost). Safari + Firefox don't ship it.
+  return typeof window.showDirectoryPicker === 'function' && window.isSecureContext;
+}
+
+// Tiny IndexedDB wrapper to persist the directory handle across page
+// reloads. We only ever store one entry — the user's chosen root folder.
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(FOLDER_DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGetHandle() {
   try {
-    const url = `/api/applications/${appId}/download`;
-    // Use an anchor + click — fetch+blob would also work but anchors give
-    // us the server's Content-Disposition filename for free.
-    const a = document.createElement('a');
-    a.href = url;
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => a.remove(), 5000);
+    const db = await idbOpen();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readonly');
+      const req = tx.objectStore('handles').get(FOLDER_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return null; }
+}
+async function idbPutHandle(handle) {
+  try {
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(handle, FOLDER_KEY);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* ignore */ }
+}
+async function idbClearHandle() {
+  try {
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').delete(FOLDER_KEY);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* ignore */ }
+}
+
+// Verify (and re-request, if needed) write permission on a stored handle.
+// Browser may revoke permission across sessions for privacy, so we always
+// re-check before writing.
+async function ensureFolderPermission(handle) {
+  if (!handle) return false;
+  try {
+    if (typeof handle.queryPermission === 'function') {
+      const status = await handle.queryPermission({ mode: 'readwrite' });
+      if (status === 'granted') return true;
+    }
+    if (typeof handle.requestPermission === 'function') {
+      const granted = await handle.requestPermission({ mode: 'readwrite' });
+      return granted === 'granted';
+    }
+    return true;
+  } catch { return false; }
+}
+
+// Prompt the user to pick a root folder. Stored in IndexedDB so future
+// downloads write there without re-prompting.
+async function pickAndStoreFolder() {
+  if (!canSaveToFolder()) {
+    showToast('Folder save not supported on this browser. Use Chrome/Edge over HTTPS or localhost.', true);
+    return null;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite', id: 'jobDashboardRoot' });
+    await idbPutHandle(handle);
+    setSaveMode('folder');
+    showToast(`Folder set: "${handle.name}". New generations will save here automatically.`);
+    return handle;
   } catch (err) {
-    showToast('Download failed: ' + err.message, true);
+    if (err.name === 'AbortError') return null;
+    showToast('Folder pick failed: ' + err.message, true);
+    return null;
   }
 }
+window.pickAndStoreFolder = pickAndStoreFolder;
+window.clearFolderHandle = async () => {
+  await idbClearHandle();
+  setSaveMode('zip');
+  showToast('Folder cleared. Future saves will use ZIP.');
+};
+
+// Save a single application's files into the user's picked folder under
+// <root>/<Company>/<Role>_<YYYY-MM-DD>/<files...>. Falls back to ZIP if
+// no handle, no permission, or the API isn't supported.
+async function saveApplicationToFolder(appId, { interactive = false } = {}) {
+  if (!canSaveToFolder()) {
+    if (interactive) showToast('Browser doesn\'t support folder save. Falling back to ZIP.', true);
+    return triggerApplicationZipDownload(appId);
+  }
+  let handle = await idbGetHandle();
+  if (!handle) {
+    if (!interactive) {
+      // Auto path with no folder yet — fall back to ZIP. The user will see
+      // a prompt to pick a folder for next time.
+      return triggerApplicationZipDownload(appId);
+    }
+    handle = await pickAndStoreFolder();
+    if (!handle) return;
+  }
+  const ok = await ensureFolderPermission(handle);
+  if (!ok) {
+    showToast('Browser revoked folder access. Click "Save to folder" to re-pick.', true);
+    return triggerApplicationZipDownload(appId);
+  }
+  try {
+    // Pull the file list + each file's bytes from the server.
+    const r = await fetch(`/api/applications/${appId}/files`, { credentials: 'same-origin' });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `files list ${r.status}`);
+    const { folder_company, folder_role_date, entries } = await r.json();
+    if (!entries?.length) throw new Error('No files to save');
+
+    // Build path: <root>/<Company>/<Role_Date>/
+    const company = sanitizeFsSegment(folder_company || 'Unknown');
+    const roleDate = sanitizeFsSegment(folder_role_date || 'Unknown');
+    const compHandle = await handle.getDirectoryHandle(company, { create: true });
+    const roleHandle = await compHandle.getDirectoryHandle(roleDate, { create: true });
+
+    let written = 0;
+    for (const entry of entries) {
+      const buf = await fetch(`/api/applications/${appId}/file?name=${encodeURIComponent(entry.name)}`, {
+        credentials: 'same-origin',
+      }).then(rr => rr.arrayBuffer());
+      const fh = await roleHandle.getFileHandle(entry.name, { create: true });
+      const w  = await fh.createWritable();
+      await w.write(buf);
+      await w.close();
+      written++;
+    }
+    showToast(`✓ Saved ${written} files to "${handle.name}/${company}/${roleDate}".`);
+  } catch (err) {
+    console.warn('[Save] folder write failed, falling back to ZIP:', err);
+    showToast('Folder save failed (' + err.message + '). Downloading ZIP instead.', true);
+    triggerApplicationZipDownload(appId);
+  }
+}
+
+// ZIP fallback — same anchor-click trick as before.
+function triggerApplicationZipDownload(appId) {
+  if (!appId) return;
+  const a = document.createElement('a');
+  a.href = `/api/applications/${appId}/download`;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 5000);
+}
+
+// Strip filesystem-illegal characters so we don't trip Windows / macOS
+// when creating subdirectories from a free-form company / role name.
+function sanitizeFsSegment(s) {
+  return String(s || '')
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || 'unknown';
+}
+
+// Public entry point used everywhere: respects the user's selected mode,
+// falls back gracefully.
+async function triggerApplicationDownload(appId, { interactive = false } = {}) {
+  if (!appId) return;
+  const mode = getSaveMode();
+  if (mode === 'folder') return saveApplicationToFolder(appId, { interactive });
+  return triggerApplicationZipDownload(appId);
+}
 window.triggerApplicationDownload = triggerApplicationDownload;
+window.saveApplicationToFolder    = saveApplicationToFolder;
+window.idbGetHandle               = idbGetHandle;
+window.canSaveToFolder            = canSaveToFolder;
 
 // ─────────────────────────────
 // Applications Tracker

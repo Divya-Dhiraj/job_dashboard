@@ -306,8 +306,9 @@
             <button class="view-toggle-btn" data-view="pdf">📄 PDF</button>
           </div>
           <button class="btn btn-ghost" id="previewMatchBtn" title="See how the tailored CV maps to the JD">🔍 Match Details</button>
+          <button class="btn btn-ghost" id="previewCompareBtn" title="Compare your resume to the generated CV side by side">🔀 Compare with resume</button>
           <button class="btn btn-ghost" id="previewEditBulletsBtn" title="Edit individual CV bullets in a separate modal">✏️ Edit Bullets</button>
-          <button class="btn btn-ghost" id="previewDownloadBtn" title="Download CV + cover letter as a structured ZIP">📦 Download all</button>
+          <button class="btn btn-ghost" id="previewDownloadBtn" title="Download CV + cover letter (folder save if available, else ZIP)">📦 Save / Download</button>
           <button class="btn btn-ghost" id="previewOpenLocal" title="Open in Finder">📂 Open Folder</button>
         </div>
       </div>
@@ -679,7 +680,23 @@
         <p class="modal-sub" style="margin: 4px 0 12px;">All your personal information is editable here. Use the wizard for a guided edit (with toggles per field).</p>
         <button class="btn btn-secondary" id="peOpenWizard" style="margin-bottom: 12px;">✏️ Edit full profile in setup wizard →</button>
 
-        <h4 class="settings-subhead">Resume library</h4>
+        <h4 class="settings-subhead">Save mode</h4>
+        <p class="modal-sub" style="margin: 4px 0 8px;">
+          When you generate a CV the files can be saved either as a structured ZIP
+          or written directly into a folder you pick. Folder save needs Chrome / Edge
+          on HTTPS or <code>localhost</code> (not raw IP).
+        </p>
+        <div class="resume-controls">
+          <label><input type="radio" name="saveMode" value="folder" id="saveModeFolder" /> Save to folder (recommended)</label>
+          <label><input type="radio" name="saveMode" value="zip" id="saveModeZip" /> Download as ZIP</label>
+        </div>
+        <div class="resume-controls" style="margin-top: 6px;">
+          <button type="button" class="btn btn-secondary" id="pickFolderBtn">📁 Pick / change folder…</button>
+          <button type="button" class="btn btn-secondary" id="clearFolderBtn">Forget folder</button>
+          <span class="resume-status" id="saveModeStatus"></span>
+        </div>
+
+        <h4 class="settings-subhead" style="margin-top: 18px;">Resume library</h4>
         <p class="modal-sub" style="margin: 4px 0 8px;">
           Store multiple resumes for different roles or industries. When you generate a CV, Claude picks the
           best-matching one automatically — or you can override the choice on the Generate dialog.
@@ -901,12 +918,28 @@
     </div>
   </div>
 
+  <!-- ─── COMPARE MODAL — resume vs generated CV side by side ─── -->
+  <div class="modal-overlay" id="compareOverlay" style="display:none">
+    <div class="modal compare-modal">
+      <button class="modal-close" id="compareClose">✕</button>
+      <h2>Compare resume ↔ generated CV</h2>
+      <p class="modal-sub" id="compareSub">
+        Each bullet from your source resume on the left. Click <strong>+</strong> on a dropped bullet to add it back into the CV at the matching role.
+      </p>
+      <div class="compare-meta" id="compareMeta"></div>
+      <div class="compare-grid" id="compareGrid">
+        <div class="compare-loading">Parsing your resume…</div>
+      </div>
+    </div>
+  </div>
+
   <script src="profile_ui.js"></script>
   <script src="app.js"></script>
   <script src="brain_ui.js"></script>
   <script src="paste_job_ui.js"></script>
   <script src="bullet_editor_ui.js"></script>
   <script src="match_explain_ui.js"></script>
+  <script src="compare_ui.js"></script>
   <script src="draft_view.js"></script>
 </body>
 </html>

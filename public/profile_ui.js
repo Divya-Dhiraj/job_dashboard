@@ -623,8 +623,75 @@
     initResumeControls(prof);
     // Multi-resume library — list + upload + default + delete
     initResumeLibrary();
+    // Save-mode controls (folder vs ZIP) and folder picker
+    initSaveModeControls();
 
     $('peDelete').style.display = '';
+  }
+
+  // Save-mode (ZIP vs folder) + folder picker controls. Mirrors the user's
+  // localStorage preference into the radio buttons and lets them
+  // pick / change / forget the root folder used for direct file save.
+  function initSaveModeControls() {
+    const folderRadio = $('saveModeFolder');
+    const zipRadio    = $('saveModeZip');
+    const pickBtn     = $('pickFolderBtn');
+    const clearBtn    = $('clearFolderBtn');
+    const status      = $('saveModeStatus');
+    if (!folderRadio || !zipRadio) return;
+
+    const supported = typeof window.showDirectoryPicker === 'function' && window.isSecureContext;
+    const PREF_KEY = 'jobDashboard:saveMode:v1';
+    const getMode = () => {
+      const v = localStorage.getItem(PREF_KEY);
+      if (v === 'folder' || v === 'zip') return v;
+      return supported ? 'folder' : 'zip';
+    };
+    const setMode = (m) => {
+      localStorage.setItem(PREF_KEY, m);
+      folderRadio.checked = m === 'folder';
+      zipRadio.checked = m === 'zip';
+    };
+    setMode(getMode());
+
+    if (!supported) {
+      folderRadio.disabled = true;
+      pickBtn.disabled = true;
+      status.className = 'resume-status err';
+      status.textContent = '✗ Folder save unavailable — needs Chrome/Edge over HTTPS or localhost.';
+    } else {
+      // Populate status with current folder if one is stored.
+      window.idbGetHandle?.().then(h => {
+        if (h) {
+          status.className = 'resume-status ok';
+          status.textContent = `✓ Folder saved: "${h.name}"`;
+        } else {
+          status.className = 'resume-status';
+          status.textContent = '(no folder picked yet — first save will prompt)';
+        }
+      });
+    }
+
+    if (!folderRadio.dataset.bound) {
+      folderRadio.onchange = () => { if (folderRadio.checked) setMode('folder'); };
+      zipRadio.onchange    = () => { if (zipRadio.checked) setMode('zip'); };
+      pickBtn.onclick      = async () => {
+        if (typeof window.pickAndStoreFolder !== 'function') return;
+        const h = await window.pickAndStoreFolder();
+        if (h) {
+          status.className = 'resume-status ok';
+          status.textContent = `✓ Folder saved: "${h.name}"`;
+          setMode('folder');
+        }
+      };
+      clearBtn.onclick = async () => {
+        if (typeof window.clearFolderHandle === 'function') await window.clearFolderHandle();
+        status.className = 'resume-status';
+        status.textContent = '(no folder picked yet — first save will prompt)';
+        setMode('zip');
+      };
+      folderRadio.dataset.bound = '1';
+    }
   }
 
   // Multi-resume library: render the cards + bind add/delete/default actions.

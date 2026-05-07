@@ -1233,6 +1233,83 @@ a:hover { text-decoration: underline; }
 .me-source-tab.active { background: rgba(99, 102, 241, 0.18); color: #c4b5fd; }
 
 /* ─────────────────────────────────────────
+   Compare modal — resume bullets vs CV bullets
+   ───────────────────────────────────────── */
+.compare-modal {
+  width: min(96vw, 1280px);
+  max-height: 92vh;
+  display: flex; flex-direction: column;
+}
+.compare-meta {
+  display: flex; gap: 18px;
+  font-size: 12px; color: #94a3b8;
+  margin: 6px 0 12px 0;
+}
+.compare-meta .cm-pill { display: inline-flex; align-items: center; gap: 6px; }
+.compare-meta .cm-pill .cm-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.cm-dot.kept    { background: #22c55e; }
+.cm-dot.dropped { background: #f59e0b; }
+.cm-dot.added   { background: #8b5cf6; }
+
+.compare-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+}
+.compare-loading { padding: 24px; color: #94a3b8; font-size: 13px; }
+.compare-col {
+  display: flex; flex-direction: column; gap: 12px;
+  min-height: 0;
+}
+.compare-col-head {
+  position: sticky; top: 0; z-index: 1;
+  padding: 8px 12px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px; font-weight: 600; color: #e2e8f0;
+}
+.compare-role {
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid #1e293b; border-radius: 8px;
+  padding: 10px 12px;
+}
+.compare-role-head {
+  font-size: 13px; color: #cbd5e1;
+  margin-bottom: 6px;
+}
+.compare-role-head .cr-title { font-weight: 600; color: #e2e8f0; }
+.compare-role-head .cr-co    { color: #a5b4fc; }
+.compare-role-head .cr-dates { color: #94a3b8; font-size: 11px; }
+.compare-bullets { display: flex; flex-direction: column; gap: 4px; }
+.compare-bullet {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px; color: #cbd5e1; line-height: 1.4;
+}
+.compare-bullet.kept    { background: rgba(34, 197, 94, 0.06); border-left: 2px solid #22c55e; }
+.compare-bullet.dropped { background: rgba(245, 158, 11, 0.07); border-left: 2px solid #f59e0b; }
+.compare-bullet.added   { background: rgba(139, 92, 246, 0.07); border-left: 2px solid #8b5cf6; }
+.compare-bullet .cb-text { flex: 1 1 auto; }
+.compare-bullet .cb-add {
+  flex: 0 0 auto;
+  padding: 2px 8px; border-radius: 4px;
+  background: rgba(99, 102, 241, 0.18); color: #c4b5fd;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.compare-bullet .cb-add:hover { background: rgba(99, 102, 241, 0.32); color: #ddd6fe; }
+.compare-bullet .cb-tag {
+  flex: 0 0 auto; padding: 2px 6px; font-size: 10px; font-weight: 600;
+  border-radius: 4px; text-transform: uppercase; letter-spacing: 0.4px;
+}
+.cb-tag.kept    { color: #86efac; background: rgba(34, 197, 94, 0.18); }
+.cb-tag.dropped { color: #fbbf24; background: rgba(245, 158, 11, 0.18); }
+.cb-tag.added   { color: #c4b5fd; background: rgba(139, 92, 246, 0.20); }
+
+/* ─────────────────────────────────────────
    Draft preview — structured HTML view inside the preview modal
    ───────────────────────────────────────── */
 .preview-view-toggle {

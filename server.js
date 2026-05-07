@@ -943,6 +943,69 @@ function guessCvFileInFolder(folder) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-file listing + serving for the File System Access API path.
+//
+// The /download endpoint returns a single ZIP. When the browser supports
+// directory write, we instead want the file MANIFEST (so the client can
+// create the right directory structure) and an endpoint to fetch each
+// file's bytes individually. These two endpoints provide that.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// What deliverable files live in a folder. Same allow-list as /download.
+function listAppDeliverables(folderPath) {
+  try {
+    return fs.readdirSync(folderPath).filter(f =>
+      /^CV_.+\.(pdf|docx)$/i.test(f) ||
+      /^Cover_Letter.*\.(pdf|docx)$/i.test(f) ||
+      f === 'job_description.txt'
+    );
+  } catch { return []; }
+}
+
+// File manifest — used by the folder-save flow to know what to fetch.
+app.get('/api/applications/:id/files', (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  if (!app.folder_path || !fs.existsSync(app.folder_path)) {
+    return res.status(404).json({ error: 'Application folder is missing on disk' });
+  }
+  const entries = listAppDeliverables(app.folder_path).map(name => ({ name }));
+  const dateStr = (app.created_at || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+  res.json({
+    folder_company:   app.company || 'Unknown',
+    folder_role_date: `${app.role || 'Unknown'}_${dateStr}`,
+    entries,
+  });
+});
+
+// Serve a single file by name. The name is allow-list-validated against
+// the manifest to prevent ../escape attacks.
+app.get('/api/applications/:id/file', async (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  if (!app.folder_path || !fs.existsSync(app.folder_path)) {
+    return res.status(404).json({ error: 'Application folder is missing on disk' });
+  }
+  const allowed = listAppDeliverables(app.folder_path);
+  const name = String(req.query.name || '');
+  if (!allowed.includes(name)) return res.status(400).json({ error: 'file not in this application' });
+
+  // Flush any debounced render so the bytes are current.
+  try { await flushRender(renderKeyFor(app.folder_path, 'en')); } catch {}
+  try { await flushRender(renderKeyFor(app.folder_path, 'de')); } catch {}
+
+  const filePath = path.join(app.folder_path, name);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'file missing' });
+  const ext = path.extname(name).toLowerCase();
+  const ctype = ext === '.pdf' ? 'application/pdf'
+              : ext === '.docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              : 'text/plain; charset=utf-8';
+  res.setHeader('Content-Type', ctype);
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.sendFile(filePath);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Bulk download — one ZIP containing CV + cover letter (PDF + DOCX, all
 // languages) plus the job description, in a structured folder layout:
 //
@@ -1163,6 +1226,168 @@ app.post('/api/applications/:id/bullet-suggestions', async (req, res) => {
       created_at: p.created_at,
     })),
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compare resume vs generated CV
+//
+// The generator drops bullets it judges low-relevance for the JD, but
+// sometimes that judgment is wrong and the user wants to put one back.
+// /compare returns a parsed view of the resume (Claude extracts roles +
+// bullets, Haiku tier) alongside the structured CV and a per-bullet
+// match map so the UI can show "this resume bullet became this CV bullet"
+// vs "this resume bullet was dropped".
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/api/applications/:id/compare', async (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  const profile = app.profile_id ? db.getProfile(app.profile_id) : db.getActiveProfile();
+  if (!profile) return res.status(401).json({ error: 'no profile' });
+
+  // Pull the saved CV in the requested language. Default 'en'.
+  const fsLocal = require('fs');
+  const pathLocal = require('path');
+  const language = ['en', 'de'].includes(req.query.lang) ? req.query.lang : 'en';
+  const jsonPath = pathLocal.join(app.folder_path, 'generated.json');
+  if (!fsLocal.existsSync(jsonPath)) return res.status(404).json({ error: 'generated.json not found' });
+  const data = JSON.parse(fsLocal.readFileSync(jsonPath, 'utf-8'));
+  const langs = data.languages || {};
+  const payload = langs[language] || (language === (data.primary_language || 'en') ? { cv: data.cv } : null);
+  if (!payload?.cv) return res.status(404).json({ error: `No CV content for language ${language}` });
+  const cv = payload.cv;
+
+  const resumeText = String(profile.resume_text || '').trim();
+  if (!resumeText) return res.status(400).json({ error: 'No resume on file for this profile' });
+
+  // Parse + map via Claude. Single Haiku call: cheap and the result is what
+  // the UI needs in one round trip.
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const MODELS = require('./models');
+    const anthropicKey = (profile && profile.anthropic_key_override) ||
+      db.getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) throw new Error('Anthropic API key not configured');
+    const client = new Anthropic({ apiKey: anthropicKey });
+
+    const sys = `You compare a candidate's source resume against the tailored CV that was generated FROM that resume for a specific job, and return a structured view that the UI can render side-by-side.
+
+Output ONLY valid JSON, no markdown fences, this exact shape:
+{
+  "resume_roles": [
+    {
+      "title":   "<role title from the resume>",
+      "company": "<company from the resume>",
+      "dates":   "<date range, free-form>",
+      "bullets": [
+        { "text": "<verbatim sentence/bullet from the resume>", "matched_cv_role": <integer index into cv.experience or null>, "matched_cv_bullet": <integer index into that role's bullets, or null> }
+      ]
+    }
+  ],
+  "summary": {
+    "kept_count":    <integer — bullets that map clearly to a CV bullet>,
+    "dropped_count": <integer — bullets in resume but not in CV>,
+    "added_count":   <integer — bullets in CV not derivable from the resume>
+  }
+}
+
+RULES:
+- Quote each resume bullet VERBATIM. Do not paraphrase.
+- Split the resume into the same role/job structure the CV uses. If the resume blob doesn't separate roles, group bullets under one role with title="" / company="".
+- For each resume bullet, decide: did it become one of the CV bullets? If yes, return matched_cv_role + matched_cv_bullet. If no, return both as null.
+- The role match key is company name first, then title. Match the CV's experience array by index (0-based).
+- Don't invent roles or bullets not in the resume.
+- Keep total bullets across roles ≤ 30 to keep the UI scannable.`;
+
+    const user = `Source resume:
+${resumeText}
+
+Tailored CV (JSON, generated from this resume for the job):
+${JSON.stringify({ experience: cv.experience || [] }, null, 2)}
+
+Return the JSON now.`;
+
+    const r = await client.messages.create({
+      model: MODELS.auxiliary,
+      max_tokens: 4096,
+      system: [{ type: 'text', text: sys, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: user }],
+    });
+    const raw = r.content[0]?.text || '';
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('Compare: no JSON in Claude response');
+    const parsed = JSON.parse(m[0]);
+
+    res.json({
+      language,
+      resume_roles: Array.isArray(parsed.resume_roles) ? parsed.resume_roles : [],
+      summary: parsed.summary || { kept_count: 0, dropped_count: 0, added_count: 0 },
+      cv: { experience: cv.experience || [] },
+      job: { title: app.role, company: app.company, location: app.location },
+    });
+  } catch (err) {
+    console.error('[Compare] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Insert a bullet into a specific role's bullets[] in the saved CV. Used
+// by the Compare modal when the user clicks "+" on a dropped resume bullet.
+// Body: { language, experience_index, bullet_text, position }
+// position defaults to end (-1 means append).
+app.post('/api/applications/:id/add-bullet', async (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  const profile = app.profile_id ? db.getProfile(app.profile_id) : db.getActiveProfile();
+  const language = ['en', 'de'].includes(req.body?.language) ? req.body.language : 'en';
+  const experienceIndex = parseInt(req.body?.experience_index);
+  const bulletText = String(req.body?.bullet_text || '').trim();
+  const position = req.body?.position == null ? -1 : parseInt(req.body.position);
+  if (!Number.isFinite(experienceIndex) || !bulletText) {
+    return res.status(400).json({ error: 'experience_index and bullet_text required' });
+  }
+
+  const fsLocal = require('fs');
+  const pathLocal = require('path');
+  const jsonPath = pathLocal.join(app.folder_path, 'generated.json');
+  if (!fsLocal.existsSync(jsonPath)) return res.status(404).json({ error: 'generated.json not found' });
+  const data = JSON.parse(fsLocal.readFileSync(jsonPath, 'utf-8'));
+
+  const langs = data.languages || {};
+  let payload = langs[language];
+  if (!payload && language === (data.primary_language || 'en')) {
+    payload = { cv: data.cv, coverLetter: data.coverLetter };
+  }
+  if (!payload?.cv) return res.status(404).json({ error: `No content for language ${language}` });
+
+  const exp = payload.cv.experience?.[experienceIndex];
+  if (!exp) return res.status(400).json({ error: 'experience_index out of range' });
+  if (!Array.isArray(exp.bullets)) exp.bullets = [];
+  // Insert. position=-1 means append.
+  if (position < 0 || position >= exp.bullets.length) exp.bullets.push(bulletText);
+  else exp.bullets.splice(position, 0, bulletText);
+
+  // Persist + mirror primary-language for legacy consumers.
+  if (data.languages) data.languages[language] = payload;
+  if (language === (data.primary_language || 'en')) {
+    data.cv = payload.cv;
+    data.coverLetter = payload.coverLetter;
+  }
+  fsLocal.writeFileSync(jsonPath, JSON.stringify(data, null, 2), 'utf-8');
+
+  // Re-render the affected language's docx + pdf via the same surgical
+  // path the field/bullet edits use.
+  try {
+    const job = db.getJobById(app.job_id, app.profile_id) ||
+      { title: app.role, company: app.company, location: app.location, description: app.job_description };
+    const r = await applyFieldEdit({
+      folderPath: app.folder_path, language, path: `cv.experience.${experienceIndex}.bullets`,
+      value: exp.bullets, job, profile,
+    });
+    res.json({ ok: true, ...r, new_count: exp.bullets.length });
+  } catch (e) {
+    console.error('[AddBullet] render error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Find the original passage(s) in the candidate's resume that a tailored
