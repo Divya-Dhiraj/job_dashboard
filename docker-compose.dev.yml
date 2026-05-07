@@ -1,0 +1,63 @@
+# docker-compose.dev.yml — DEVELOPMENT overlay.
+#
+# Layered on top of docker-compose.yml, this version mounts your project
+# source as a live volume so edits in Cursor are picked up immediately
+# (with nodemon restarting the server on save).
+#
+# Usage from the project folder:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# (Yes, both -f flags. Compose merges them; the second one wins where they
+# overlap, e.g. the command and the volumes.)
+#
+# Stop with Ctrl+C. To rebuild deps after package.json changes:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm app npm install
+#
+# What this file changes vs. production compose:
+#   - Mounts the whole source folder so file edits are visible inside the
+#     container without rebuild
+#   - Uses nodemon (already in devDependencies) so the server restarts
+#     when you save a .js file
+#   - Keeps node_modules INSIDE the container (named volume) so the host's
+#     Mac-native binaries never shadow the container's Linux binaries —
+#     critical for sharp + puppeteer
+#
+# What it leaves alone:
+#   - Same Dockerfile / image (chromium + libvips42 baked in)
+#   - Same persistent volumes for jobs.db, applications/, .env
+
+services:
+  app:
+    # Force install of devDependencies (nodemon) when the image is built
+    # in dev mode. Override the production NODE_ENV.
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+    # Bind-mount the project root so edits flow into the container.
+    # The named volume "node_modules" sits ON TOP of the bind mount and
+    # shadows it, so the host's node_modules can't pollute the container.
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - ./jobs.db:/app/jobs.db
+      - ./applications:/app/applications
+      - ./.env:/app/.env:ro
+      - ./.embeddings-cache:/root/.cache/huggingface
+    # Install dev deps + run nodemon on container start. The first install
+    # is cached in the named volume; subsequent boots skip it.
+    command: >
+      sh -c "
+        if [ ! -d /app/node_modules/.bin ] || [ ! -f /app/node_modules/.bin/nodemon ]; then
+          echo '[dev] First-time install (will be cached)...';
+          npm install --include=dev;
+        fi;
+        npx nodemon --watch . --ignore 'jobs.db' --ignore 'applications/' --ignore '.embeddings-cache/' --ignore '_template_samples/' server.js
+      "
+    # Healthcheck doesn't really apply in dev (you're watching logs)
+    healthcheck:
+      disable: true
+
+volumes:
+  node_modules:

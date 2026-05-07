@@ -1,0 +1,50 @@
+# .gitignore — what NEVER gets committed.
+#
+# Rule of thumb: anything that's per-install (your secrets, your DB, your
+# generated PDFs) stays out. Anything that defines the app (source code,
+# Dockerfile, package.json) goes in.
+
+# Dependencies — reinstalled via `npm install`
+node_modules/
+
+# Per-install state
+jobs.db
+jobs.db-journal
+.env
+.env.local
+.env.*.local
+# .env.shared holds the bundled Anthropic key for friends-distribution.
+# It MUST NEVER hit GitHub — distribute it out-of-band (encrypted DM, etc.)
+# and let install.sh / install.ps1 copy it to .env on each machine.
+.env.shared
+
+# Generated outputs at runtime
+applications/
+!applications/.gitkeep
+_template_samples/
+
+# Caches
+.embeddings-cache/
+.cache/
+.parcel-cache/
+
+# Mac / Windows noise
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test artifacts
+jobs.smoketest.db
+.coverage/
+coverage/

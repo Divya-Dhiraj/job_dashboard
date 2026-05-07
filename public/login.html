@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in — Job Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+    .auth-card {
+      width: 100%; max-width: 460px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      border-radius: 16px; padding: 32px;
+      backdrop-filter: blur(8px);
+    }
+    .auth-card h1 { margin: 0 0 4px; font-size: 26px; }
+    .auth-sub { color: #94a3b8; margin: 0 0 24px; font-size: 14px; }
+    .auth-error {
+      display: none; margin-bottom: 12px;
+      padding: 10px 14px; border-radius: 8px;
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5; font-size: 13px;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .auth-error.show { display: block; }
+    .auth-tabs {
+      display: flex; gap: 4px; margin-bottom: 18px;
+      background: rgba(99, 102, 241, 0.06);
+      padding: 4px; border-radius: 10px;
+    }
+    .auth-tab {
+      flex: 1; text-align: center; padding: 8px;
+      border-radius: 8px; cursor: pointer;
+      font-size: 13px; font-weight: 600; color: #94a3b8;
+      background: transparent; border: 0;
+    }
+    .auth-tab.active { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; }
+    .auth-form .field { margin-bottom: 12px; }
+    .auth-form .field-label { font-size: 12px; color: #94a3b8; margin-bottom: 4px; display: block; }
+    .auth-form .input { width: 100%; }
+    .auth-form .btn { width: 100%; margin-top: 6px; }
+    .auth-hint { font-size: 12px; color: #64748b; margin-top: 4px; }
+    .first-run-banner {
+      display: none;
+      padding: 10px 14px; margin-bottom: 14px;
+      border-radius: 8px;
+      background: rgba(34, 197, 94, 0.10);
+      color: #86efac; font-size: 13px;
+      border: 1px solid rgba(34, 197, 94, 0.25);
+    }
+    .first-run-banner.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="aurora"></div>
+
+  <div class="auth-card">
+    <h1>🎯 Job Dashboard</h1>
+    <p class="auth-sub">Sign in to your profile, or create a new one.</p>
+
+    <div class="first-run-banner" id="firstRunBanner">
+      <strong>Welcome.</strong> No profiles exist yet — switch to "Sign up" to create the first one.
+    </div>
+
+    <div class="auth-tabs" role="tablist">
+      <button class="auth-tab active" data-tab="login" id="tabLogin">Sign in</button>
+      <button class="auth-tab" data-tab="signup" id="tabSignup">Sign up</button>
+    </div>
+
+    <div class="auth-error" id="authError"></div>
+
+    <!-- Login form -->
+    <form class="auth-form" id="loginForm">
+      <div class="field">
+        <label class="field-label" for="loginUsername">Username</label>
+        <input class="input" id="loginUsername" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label class="field-label" for="loginPassword">Password</label>
+        <input class="input" id="loginPassword" type="password" autocomplete="current-password" required />
+      </div>
+      <button class="btn btn-primary btn-lg" type="submit">Sign in →</button>
+    </form>
+
+    <!-- Signup form -->
+    <form class="auth-form" id="signupForm" style="display:none">
+      <div class="field">
+        <label class="field-label" for="signupUsername">Username</label>
+        <input class="input" id="signupUsername" autocomplete="username" required />
+        <div class="auth-hint">3-31 characters, lowercase letters / digits / dots / dashes / underscores</div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="signupPassword">Password</label>
+        <input class="input" id="signupPassword" type="password" autocomplete="new-password" required minlength="8" />
+        <div class="auth-hint">At least 8 characters</div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="signupName">Display name</label>
+        <input class="input" id="signupName" placeholder="e.g. Avinash Katikireddy" required />
+      </div>
+      <button class="btn btn-primary btn-lg" type="submit">Create profile →</button>
+      <div class="auth-hint" style="margin-top:8px">After creating your account, you'll be guided through a setup wizard to upload your CV, photo, choose a template, and set personal details.</div>
+    </form>
+
+    <!-- Forced password change (initial set) -->
+    <form class="auth-form" id="initialPasswordForm" style="display:none">
+      <p class="auth-sub">This profile has no password yet. Set one to continue.</p>
+      <div class="field">
+        <label class="field-label" for="initialPassword">New password</label>
+        <input class="input" id="initialPassword" type="password" autocomplete="new-password" required minlength="8" />
+      </div>
+      <button class="btn btn-primary btn-lg" type="submit">Set password &amp; sign in →</button>
+    </form>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    let mode = 'login';
+    let pendingPasswordSetProfileId = null;
+
+    function showError(msg) {
+      const el = $('authError');
+      el.textContent = msg;
+      el.classList.add('show');
+    }
+    function clearError() { $('authError').classList.remove('show'); }
+
+    function setMode(next) {
+      mode = next;
+      $('tabLogin').classList.toggle('active',  next === 'login');
+      $('tabSignup').classList.toggle('active', next === 'signup');
+      $('loginForm').style.display          = next === 'login'   ? '' : 'none';
+      $('signupForm').style.display         = next === 'signup'  ? '' : 'none';
+      $('initialPasswordForm').style.display = next === 'initial' ? '' : 'none';
+      clearError();
+    }
+
+    $('tabLogin').onclick  = () => setMode('login');
+    $('tabSignup').onclick = () => setMode('signup');
+
+    // Bootstrap — if a session already exists, jump straight to the dashboard.
+    // If no profiles exist yet, prompt the user to sign up first.
+    (async () => {
+      try {
+        const r = await fetch('/api/auth/bootstrap').then(r => r.json());
+        if (r.has_session) { window.location.href = '/'; return; }
+        if (!r.has_profiles) {
+          $('firstRunBanner').classList.add('show');
+          setMode('signup');
+        }
+      } catch {}
+    })();
+
+    $('loginForm').onsubmit = async (e) => {
+      e.preventDefault(); clearError();
+      const username = $('loginUsername').value.trim();
+      const password = $('loginPassword').value;
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (res.status === 409) {
+          // Profile exists but has no password set — go to initial-set flow
+          const data = await res.json();
+          pendingPasswordSetProfileId = data.profileId;
+          setMode('initial');
+          return;
+        }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showError(err.error === 'invalid-credentials' ? 'Wrong username or password.' : (err.error || 'Sign-in failed.'));
+          return;
+        }
+        // Logged in — redirect to dashboard
+        window.location.href = '/';
+      } catch (e) { showError(e.message); }
+    };
+
+    $('signupForm').onsubmit = async (e) => {
+      e.preventDefault(); clearError();
+      const username = $('signupUsername').value.trim();
+      const password = $('signupPassword').value;
+      const name     = $('signupName').value.trim();
+      try {
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password, profile: { name } }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showError(err.error || 'Sign-up failed.');
+          return;
+        }
+        // Account created + signed in — go straight to the dashboard, which
+        // will detect that the profile is incomplete and open the setup
+        // wizard automatically (CV upload, photo, template, etc).
+        window.location.href = '/?welcome=1';
+      } catch (e) { showError(e.message); }
+    };
+
+    $('initialPasswordForm').onsubmit = async (e) => {
+      e.preventDefault(); clearError();
+      const newPassword = $('initialPassword').value;
+      try {
+        const res = await fetch('/api/auth/change-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profileId: pendingPasswordSetProfileId, newPassword }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showError(err.error || 'Could not set password.');
+          return;
+        }
+        window.location.href = '/';
+      } catch (e) { showError(e.message); }
+    };
+  </script>
+</body>
+</html>

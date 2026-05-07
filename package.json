@@ -1,0 +1,35 @@
+{
+  "name": "job-dashboard",
+  "version": "2.0.0",
+  "description": "Multi-profile job scraper, matcher & dashboard with Claude-powered CV/cover letter generation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "setup": "bash setup.sh",
+    "postinstall": "node -e \"try { require('child_process').execSync('npx puppeteer browsers install chrome', { stdio: 'inherit' }); } catch (e) { console.warn('[postinstall] Chrome download failed (non-fatal — run `npx puppeteer browsers install chrome` manually before generating PDFs).'); }\""
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.87.0",
+    "@xenova/transformers": "^2.17.2",
+    "axios": "^1.6.7",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "docx": "^9.6.1",
+    "dotenv": "^16.4.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.18.2",
+    "mammoth": "^1.9.0",
+    "multer": "^2.0.1",
+    "natural": "^6.10.4",
+    "node-cron": "^3.0.3",
+    "pdf-parse": "^1.1.1",
+    "puppeteer": "^24.40.0",
+    "sharp": "^0.34.5",
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}

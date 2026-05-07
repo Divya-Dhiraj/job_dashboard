@@ -1,0 +1,33 @@
+# .dockerignore — Files NOT shipped into the Docker build context.
+# Smaller context = faster builds + smaller image.
+
+node_modules/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# Mac noise
+.DS_Store
+**/.DS_Store
+
+# Per-install state — bind-mounted at runtime, not baked into image
+jobs.db
+jobs.db-journal
+.env
+.env.*
+!.env.example
+
+# Generated outputs — created at runtime
+applications/
+_template_samples/
+
+# Caches
+.embeddings-cache/
+.cache/
+
+# Logs / editor
+*.log
+.vscode/
+.idea/

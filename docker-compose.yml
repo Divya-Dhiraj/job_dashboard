@@ -1,0 +1,51 @@
+# docker-compose.yml — Run the Job Dashboard with persistent state.
+#
+# What persists across container restarts:
+#   - jobs.db  → bind-mount, so deleting the container doesn't wipe your
+#     profiles, jobs, brain
+#   - applications/ → bind-mount, so generated CV/cover-letter folders stay
+#     on your Mac filesystem (open with Finder, attach to emails, etc.)
+#   - .env → bind-mount read-only, so the container picks up your API keys
+#     without baking them into the image
+#   - .embeddings-cache/ → optional cache for the bge-base-en-v1.5 ONNX
+#     model so it isn't re-downloaded on every container rebuild
+#
+# Usage:
+#   docker compose up --build      # first time / after Dockerfile changes
+#   docker compose up              # subsequent runs (uses cached image)
+#   docker compose down            # stop + remove container
+#   docker compose logs -f         # tail the live logs
+#
+# After it boots: open http://localhost:3000 — same as `npm start`.
+
+services:
+  app:
+    build:
+      context: .
+      # Force linux/arm64 on Apple Silicon. Comment this line out if you're
+      # on Intel Mac or running on a Linux server.
+      platforms:
+        - linux/arm64
+    image: job-dashboard:local
+    container_name: job-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./jobs.db:/app/jobs.db
+      - ./applications:/app/applications
+      - ./.env:/app/.env:ro
+      # Cache the embedding model so rebuilds don't re-download ~440 MB.
+      # Created on first run; safe to delete to force re-download.
+      - ./.embeddings-cache:/root/.cache/huggingface
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    # When Chromium crashes inside the sandbox-less container, the JS process
+    # would survive but be in a bad state. Healthcheck triggers restart.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/auth/bootstrap || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

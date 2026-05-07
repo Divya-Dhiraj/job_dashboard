@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Job Dashboard 🎯</title>
+  <meta name="description" content="Automated multi-profile job tracking dashboard — LinkedIn & Indeed, resume-matched and sorted by relevance." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Auth gate — runs before anything else. Redirects to /login.html if no
+       session is found. We make the call synchronously-ish via a head-of-body
+       script so the rest of the dashboard never paints for unauthenticated
+       users. -->
+  <script>
+    (function() {
+      fetch('/api/auth/bootstrap', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => {
+          if (!d.has_profiles) {
+            window.location.replace('/login.html');
+            return;
+          }
+          if (!d.has_session) {
+            window.location.replace('/login.html');
+          }
+        })
+        .catch(() => window.location.replace('/login.html'));
+    })();
+  </script>
+
+  <!-- Background Aurora -->
+  <div class="aurora"></div>
+
+  <!-- ─── HEADER ─── -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">🎯</span>
+        <div>
+          <h1 class="logo-title">Job Dashboard</h1>
+          <span class="logo-sub" id="logoSub">LinkedIn + Indeed</span>
+        </div>
+      </div>
+      <!-- Logged-in profile chip + dropdown (Settings, Logout) -->
+      <div class="profile-switcher" id="profileSwitcher">
+        <button class="profile-btn" id="profileBtn" title="Account menu">
+          <span class="profile-avatar" id="profileAvatar">·</span>
+          <span class="profile-meta">
+            <span class="profile-name" id="profileName">Loading…</span>
+            <span class="profile-sub" id="profileSub"></span>
+          </span>
+          <span class="profile-caret">▾</span>
+        </button>
+        <div class="profile-menu" id="profileMenu">
+          <button class="profile-menu-item" id="profileMenuSettings">⚙️ Settings</button>
+          <div class="profile-menu-divider"></div>
+          <button class="profile-menu-item" id="profileMenuLogout">↩︎ Sign out</button>
+        </div>
+      </div>
+    </div>
+    <div class="header-center">
+      <div class="scrape-status" id="scrapeStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Checking...</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="li-chip" id="liChip" title="LinkedIn scraper mode">🔗 LinkedIn: …</span>
+      <div class="live-clock" id="liveClock"></div>
+      <button class="btn btn-ghost" id="testEmailBtn" title="Send test email">📧 Test Email</button>
+      <button class="btn btn-ghost" id="brainBtn" title="Profile brain">🧠 Brain</button>
+      <button class="btn btn-ghost" id="pasteJobBtn" title="Paste a job description manually">✍️ Paste Job</button>
+      <button class="btn btn-secondary" id="myAppsBtn">📋 My Applications</button>
+      <button class="btn btn-primary" id="scrapeBtn">⚡ Scrape Now</button>
+    </div>
+  </header>
+
+  <!-- ─── STATS CARDS ─── -->
+  <section class="stats-row" id="statsRow">
+    <div class="stat-card" id="statTotal">
+      <div class="stat-icon">📋</div>
+      <div class="stat-body">
+        <div class="stat-value" id="totalJobs">—</div>
+        <div class="stat-label">Total Jobs</div>
+      </div>
+    </div>
+    <div class="stat-card accent-green" id="statToday">
+      <div class="stat-icon">🆕</div>
+      <div class="stat-body">
+        <div class="stat-value" id="todayJobs">—</div>
+        <div class="stat-label">Added Today</div>
+      </div>
+    </div>
+    <div class="stat-card accent-purple" id="statAvg">
+      <div class="stat-icon">🎯</div>
+      <div class="stat-body">
+        <div class="stat-value" id="avgScore">—</div>
+        <div class="stat-label">Avg Match %</div>
+      </div>
+    </div>
+    <div class="stat-card accent-amber">
+      <div class="stat-icon">🏆</div>
+      <div class="stat-body">
+        <div class="stat-value" id="topMatch">—</div>
+        <div class="stat-label" id="topMatchLabel">Top Match</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── MAIN CONTENT ─── -->
+  <main class="main">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+
+      <!-- Filters -->
+      <div class="panel">
+        <h3 class="panel-title">🔍 Filters</h3>
+
+        <div class="field">
+          <label class="field-label">Search</label>
+          <input type="text" class="input" id="searchInput" placeholder="Title, company, skill..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Source</label>
+          <select class="input" id="sourceFilter">
+            <option value="">All Sources</option>
+            <option value="LinkedIn">LinkedIn</option>
+            <option value="Indeed">Indeed</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">
+            Min Match: <strong id="minScoreVal">0%</strong>
+          </label>
+          <input type="range" class="range" id="minScore" min="0" max="100" step="5" value="0" />
+        </div>
+        <div class="field">
+          <label class="field-label">Sort By</label>
+          <select class="input" id="sortBy">
+            <option value="posted_at">Date Posted (newest)</option>
+            <option value="match_score">Match %</option>
+            <option value="scraped_at">Date Found</option>
+            <option value="title">Title A–Z</option>
+          </select>
+        </div>
+        <button class="btn btn-secondary w-full" id="resetFilters">↺ Reset Filters</button>
+      </div>
+
+      <!-- Resume Skills -->
+      <div class="panel">
+        <h3 class="panel-title">📄 Your Skills</h3>
+        <div class="skill-tags" id="resumeSkills">
+          <span class="skill-tag loading">Loading...</span>
+        </div>
+      </div>
+
+      <!-- Timeline Chart -->
+      <div class="panel">
+        <h3 class="panel-title">📈 Jobs Over Time</h3>
+        <canvas id="timelineChart" height="160"></canvas>
+      </div>
+
+    </aside>
+
+    <!-- Jobs Area -->
+    <div class="jobs-area">
+
+      <!-- Table Header -->
+      <div class="table-header">
+        <div class="table-title">
+          Job Listings
+          <span class="badge" id="jobCount">0</span>
+        </div>
+        <div class="table-actions">
+          <span class="last-updated" id="lastUpdated">—</span>
+          <div class="view-toggle">
+            <button class="view-btn active" id="viewTable" title="Table view">☰</button>
+            <button class="view-btn" id="viewCards" title="Card view">⊞</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Loading / Empty States -->
+      <div class="loader" id="loader">
+        <div class="spinner"></div>
+        <p>Fetching jobs...</p>
+      </div>
+      <div class="empty" id="emptyState" style="display:none">
+        <div class="empty-icon">🔍</div>
+        <p>No jobs found matching your filters.</p>
+        <button class="btn btn-primary" id="scrapeNowEmpty">Scrape Now</button>
+      </div>
+
+      <!-- Table View -->
+      <div class="table-wrap" id="tableView" style="display:none">
+        <table class="jobs-table">
+          <thead>
+            <tr>
+              <th>Match</th>
+              <th>Title</th>
+              <th>Company</th>
+              <th>Location</th>
+              <th>Posted</th>
+              <th>Applicants</th>
+              <th>Source</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="jobsTableBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Card View -->
+      <div class="cards-grid" id="cardsView" style="display:none"></div>
+
+    </div>
+  </main>
+
+  <!-- ─── JOB DETAIL MODAL ─── -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal" id="modal">
+      <button class="modal-close" id="modalClose">✕</button>
+      <div class="modal-header">
+        <div>
+          <h2 class="modal-title" id="modalTitle"></h2>
+          <p class="modal-meta" id="modalMeta"></p>
+        </div>
+        <div class="modal-score" id="modalScore"></div>
+      </div>
+      <div class="modal-skills" id="modalSkills"></div>
+      <div class="modal-desc" id="modalDesc"></div>
+      <div class="modal-footer">
+        <a class="btn btn-apply btn-lg" id="modalApply" href="#" target="_blank" rel="noopener">Apply Now →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── APPLY DIALOG MODAL ─── -->
+  <div class="modal-overlay" id="applyDialogOverlay">
+    <div class="modal apply-dialog">
+      <button class="modal-close" id="applyDialogClose">✕</button>
+      <div class="apply-dialog-icon">📝</div>
+      <h2 class="apply-dialog-title">Generate Tailored Application?</h2>
+      <p class="apply-dialog-text">
+        Would you like to generate a <strong>tailored CV</strong> and <strong>cover letter</strong> for this position?
+      </p>
+      <div class="apply-dialog-job" id="applyDialogJob"></div>
+
+      <div class="apply-dialog-lang">
+        <span class="apply-dialog-lang-label">Language</span>
+        <label><input type="radio" name="applyDialogLang" value="en" checked /> 🇬🇧 English</label>
+        <label><input type="radio" name="applyDialogLang" value="de" /> 🇩🇪 German</label>
+        <label><input type="radio" name="applyDialogLang" value="both" /> 🌍 Both</label>
+      </div>
+
+      <div class="apply-dialog-actions">
+        <button class="btn btn-primary btn-lg" id="applyDialogYes">Yes, Generate</button>
+        <button class="btn btn-secondary btn-lg" id="applyDialogNo">No, Just Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── GENERATING SPINNER OVERLAY ─── -->
+  <div class="modal-overlay" id="generatingOverlay">
+    <div class="generating-box">
+      <div class="generating-spinner"></div>
+      <h3>Generating your tailored CV &amp; Cover Letter...</h3>
+      <p class="generating-sub">Claude is analyzing the job description and crafting your documents.</p>
+    </div>
+  </div>
+
+  <!-- ─── APPLICATION PREVIEW MODAL ─── -->
+  <div class="modal-overlay" id="previewOverlay">
+    <div class="modal preview-modal">
+      <button class="modal-close" id="previewClose">✕</button>
+      <div class="preview-header">
+        <div>
+          <h2 class="preview-title" id="previewTitle">Application Preview</h2>
+          <p class="preview-meta" id="previewMeta"></p>
+        </div>
+        <div class="preview-actions-top">
+          <div class="lang-tabs" id="previewLangTabs"></div>
+          <div class="preview-view-toggle" id="previewViewToggle">
+            <button class="view-toggle-btn active" data-view="draft">📝 Draft</button>
+            <button class="view-toggle-btn" data-view="pdf">📄 PDF</button>
+          </div>
+          <button class="btn btn-ghost" id="previewMatchBtn" title="See how the tailored CV maps to the JD">🔍 Match Details</button>
+          <button class="btn btn-ghost" id="previewEditBulletsBtn" title="Edit individual CV bullets in a separate modal">✏️ Edit Bullets</button>
+          <button class="btn btn-ghost" id="previewOpenLocal" title="Open in Finder">📂 Open Folder</button>
+        </div>
+      </div>
+
+      <!-- DRAFT view — structured HTML rendering of the CV + cover letter
+           with inline expandable bullet alternatives. Default view. -->
+      <div class="preview-draft" id="previewDraft"></div>
+
+      <!-- PDF view — the original two-iframe pair. Hidden by default; user
+           toggles via the 📄 PDF button when they want to see what the
+           rendered output looks like. -->
+      <div class="preview-panes" id="previewPanes" style="display:none">
+        <div class="preview-pane">
+          <h3 class="pane-label">CV</h3>
+          <iframe id="previewCvFrame" class="preview-iframe"></iframe>
+          <div class="pane-edit">
+            <input type="text" class="input pane-edit-input" id="editCvInput" placeholder="e.g. Emphasize SAP experience more..." />
+            <button class="btn btn-secondary" id="editCvBtn">Edit CV</button>
+          </div>
+        </div>
+        <div class="preview-pane">
+          <h3 class="pane-label">Cover Letter</h3>
+          <iframe id="previewClFrame" class="preview-iframe"></iframe>
+          <div class="pane-edit">
+            <input type="text" class="input pane-edit-input" id="editClInput" placeholder="e.g. Make the tone more enthusiastic..." />
+            <button class="btn btn-secondary" id="editClBtn">Edit Cover Letter</button>
+          </div>
+        </div>
+      </div>
+      <div class="preview-footer">
+        <label class="apply-checkbox">
+          <input type="checkbox" id="previewAppliedCheck" />
+          <span>Mark as Applied</span>
+        </label>
+        <a class="btn btn-apply btn-lg" id="previewApplyLink" href="#" target="_blank" rel="noopener">Open Job &amp; Apply →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── APPLICATIONS TRACKER TAB ─── -->
+  <div class="tracker-overlay" id="trackerOverlay" style="display:none">
+    <div class="tracker-container">
+      <div class="tracker-header">
+        <div>
+          <h2>My Applications</h2>
+          <p class="tracker-sub" id="trackerCount">0 applications tracked</p>
+        </div>
+        <div class="tracker-actions">
+          <button class="btn btn-secondary" id="exportExcelBtn">📊 Export to Excel</button>
+          <button class="btn btn-ghost" id="trackerCloseBtn">✕ Close</button>
+        </div>
+      </div>
+      <div class="tracker-table-wrap">
+        <table class="tracker-table">
+          <thead>
+            <tr>
+              <th>Company</th>
+              <th>Role</th>
+              <th>Location</th>
+              <th>Match</th>
+              <th>Status</th>
+              <th>Applied</th>
+              <th>Date</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="trackerBody"></tbody>
+        </table>
+        <div class="tracker-empty" id="trackerEmpty" style="display:none">
+          <p>No applications yet. Click "Apply Now" on a job to get started.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── BRAIN OVERLAY ─── -->
+  <div class="tracker-overlay" id="brainOverlay" style="display:none">
+    <div class="tracker-container brain-container">
+      <div class="tracker-header">
+        <div>
+          <h2>🧠 Profile Brain — <span id="brainProfileName">…</span></h2>
+          <p class="tracker-sub" id="brainSub">Companies, skills, insights, and lessons learned</p>
+        </div>
+        <div class="tracker-actions">
+          <button class="btn btn-secondary" id="brainReflectBtn" title="Trigger Claude reflection now">🔁 Reflect</button>
+          <button class="btn btn-ghost" id="brainCloseBtn">✕ Close</button>
+        </div>
+      </div>
+
+      <div class="brain-grid">
+        <!-- Stats row -->
+        <section class="brain-stats">
+          <div class="brain-stat"><div class="bs-val" id="bsGen">—</div><div class="bs-lbl">Generations</div></div>
+          <div class="brain-stat"><div class="bs-val" id="bsApp">—</div><div class="bs-lbl">Applied</div></div>
+          <div class="brain-stat"><div class="bs-val" id="bsCo">—</div><div class="bs-lbl">Companies</div></div>
+          <div class="brain-stat"><div class="bs-val" id="bsAngles">—</div><div class="bs-lbl">Angles</div></div>
+          <div class="brain-stat"><div class="bs-val" id="bsIns">—</div><div class="bs-lbl">Insights</div></div>
+          <div class="brain-stat"><div class="bs-val" id="bsFacts">—</div><div class="bs-lbl">Facts</div></div>
+        </section>
+
+        <!-- Angles (role archetypes) — distinct positionings within one profile -->
+        <section class="brain-section">
+          <h3>Roles you target <span class="hint">(each "angle" is a distinct positioning — e.g. SAP Consultant vs. Data Analyst — and learns separately)</span></h3>
+          <div id="brainAnglesList" class="brain-list"></div>
+          <div class="angle-filter-row">
+            <label class="field-label" for="brainAngleFilter">Filter insights &amp; facts by angle</label>
+            <select class="input" id="brainAngleFilter">
+              <option value="">All angles (cross-angle wisdom only)</option>
+            </select>
+          </div>
+        </section>
+
+        <!-- Skills demand vs supply -->
+        <section class="brain-section">
+          <h3>Skill demand vs. supply</h3>
+          <p class="brain-hint">How often jobs ask for a skill (demand) vs. how often it appears in your generated CVs (supply).</p>
+          <canvas id="brainSkillChart" height="220"></canvas>
+        </section>
+
+        <!-- Insights -->
+        <section class="brain-section">
+          <h3>Insights <span class="hint">(Claude-distilled lessons; click to edit, toggle, or delete)</span></h3>
+          <div id="brainInsightsList" class="brain-list"></div>
+        </section>
+
+        <!-- Facts -->
+        <section class="brain-section">
+          <h3>Facts you've added</h3>
+          <div class="fact-composer">
+            <input class="input" id="newFactInput" placeholder="e.g. Recruiter at X said they value modeling > pipelines" />
+            <input class="input" id="newFactTag" placeholder="tag (optional)" style="max-width:140px" />
+            <select class="input" id="newFactAngle" style="max-width:200px">
+              <option value="">Applies to all angles</option>
+            </select>
+            <button class="btn btn-primary" id="addFactBtn">Add fact</button>
+          </div>
+          <div id="brainFactsList" class="brain-list"></div>
+        </section>
+
+        <!-- Companies seen -->
+        <section class="brain-section">
+          <h3>Companies the brain has seen</h3>
+          <div id="brainCompaniesList" class="brain-list"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SETUP WIZARD MODAL ─── -->
+  <div class="modal-overlay wizard-overlay" id="wizardOverlay" style="display:none">
+    <div class="modal wizard-modal">
+      <button class="modal-close" id="wizardClose">✕</button>
+      <div class="wizard-header">
+        <h2 id="wizardTitle">Finish setting up your profile</h2>
+        <p class="wizard-sub" id="wizardSub">A few more steps and you'll be ready to apply.</p>
+        <div class="wizard-steps" id="wizardSteps">
+          <span class="wizard-step active" data-step="1">1. CV</span>
+          <span class="wizard-step" data-step="2">2. Personal</span>
+          <span class="wizard-step" data-step="3">3. Languages</span>
+          <span class="wizard-step" data-step="4">4. Photo</span>
+          <span class="wizard-step" data-step="5">5. Template</span>
+          <span class="wizard-step" data-step="6">6. Countries</span>
+          <span class="wizard-step" data-step="7">7. Keys</span>
+          <span class="wizard-step" data-step="8">8. Done</span>
+        </div>
+      </div>
+
+      <!-- Step 1: Upload CV -->
+      <div class="wizard-body wizard-step-body" data-step="1">
+        <div class="dropzone" id="cvDropzone">
+          <div class="dropzone-icon">📄</div>
+          <p><strong>Drop your CV here</strong> or click to browse</p>
+          <p class="dropzone-hint">PDF, DOCX, or TXT — up to 10 MB · Claude parses it and pre-fills the next steps</p>
+          <input type="file" id="cvFileInput" accept=".pdf,.docx,.txt" hidden />
+        </div>
+        <div class="wizard-note" id="wizardUploadNote"></div>
+        <div class="wizard-actions">
+          <button class="btn btn-ghost" data-wizard-next="2">Skip — fill in manually</button>
+          <button class="btn btn-primary" id="wizardUploadBtn" disabled>Parse with Claude →</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Personal info — every field has an "include in CV" toggle -->
+      <div class="wizard-body wizard-step-body" data-step="2" style="display:none">
+        <p class="wizard-note">Each field has a toggle. Unchecked fields are stored in the profile but never appear on the CV / cover letter — useful for AGG-sensitive details (DOB, photo, marital status, nationality).</p>
+
+        <div class="form-grid">
+          <div class="field full toggle-field"><label class="field-label">Full name</label>
+            <input class="input" id="wzName" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="name" checked/> include in CV</label></div>
+          <div class="field toggle-field"><label class="field-label">Email</label>
+            <input class="input" id="wzEmail" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="email" checked/> include</label></div>
+          <div class="field toggle-field"><label class="field-label">Phone</label>
+            <input class="input" id="wzPhone" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="phone" checked/> include</label></div>
+          <div class="field toggle-field"><label class="field-label">Location (City, Country)</label>
+            <input class="input" id="wzAddress" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="address" checked/> include</label></div>
+          <div class="field full toggle-field"><label class="field-label">LinkedIn</label>
+            <input class="input" id="wzLinkedin" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="linkedin" checked/> include</label></div>
+          <div class="field toggle-field"><label class="field-label">Date of birth (DD.MM.YYYY)</label>
+            <input class="input" id="wzDob" placeholder="14.03.1992" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="dob"/> include in CV (optional under AGG)</label></div>
+          <div class="field toggle-field"><label class="field-label">Place of birth</label>
+            <input class="input" id="wzPlaceOfBirth" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="place_of_birth"/> include</label></div>
+          <div class="field toggle-field"><label class="field-label">Nationality</label>
+            <input class="input" id="wzNationality" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="nationality"/> include</label></div>
+          <div class="field toggle-field"><label class="field-label">Marital status</label>
+            <input class="input" id="wzMaritalStatus" placeholder="Single / Married" />
+            <label class="incl-toggle"><input type="checkbox" data-vis="marital_status"/> include</label></div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Search titles (comma-separated, used by the scraper)</label>
+          <input class="input" id="wzSearchTitles" placeholder="Data Engineer, Analytics Engineer, ..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Skill groups (auto-detected from your CV; edit JSON if needed)</label>
+          <textarea class="input mono" id="wzSkillGroups" rows="5"></textarea>
+        </div>
+
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="1">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="3">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Languages with CEFR levels -->
+      <div class="wizard-body wizard-step-body" data-step="3" style="display:none">
+        <p class="wizard-note">German CVs traditionally list languages with CEFR proficiency. Add as many as you need.</p>
+        <div id="wzLangList"></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="wzLangAdd">＋ Add language</button>
+        <label class="incl-toggle" style="margin-top:8px;"><input type="checkbox" data-vis="languages" checked/> include languages section in CV</label>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="2">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="4">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 4: Photo upload -->
+      <div class="wizard-body wizard-step-body" data-step="4" style="display:none">
+        <p class="wizard-note">Optional. German CVs traditionally include a professional photo top-right (now legally optional under AGG). Skip to omit.</p>
+        <div class="photo-upload-row">
+          <div class="photo-preview" id="wzPhotoPreview">
+            <span class="photo-placeholder">No photo</span>
+          </div>
+          <div class="photo-actions">
+            <input type="file" id="wzPhotoInput" accept="image/png,image/jpeg" hidden />
+            <button type="button" class="btn btn-secondary" id="wzPhotoPickBtn">Choose photo…</button>
+            <button type="button" class="btn btn-ghost danger" id="wzPhotoClearBtn" style="display:none">Remove</button>
+          </div>
+        </div>
+        <label class="incl-toggle" style="margin-top:8px;"><input type="checkbox" data-vis="photo" checked/> include photo in CV (only renders if uploaded)</label>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="3">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="5">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 5: Template choice -->
+      <div class="wizard-body wizard-step-body" data-step="5" style="display:none">
+        <p class="wizard-note">Choose the template the generator will use for your CV. You can change this later in Settings.</p>
+        <div class="template-list" id="wzTemplateList"></div>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="4">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="6">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 6: Countries -->
+      <div class="wizard-body wizard-step-body" data-step="6" style="display:none">
+        <div class="field">
+          <label class="field-label">Quick presets</label>
+          <div class="preset-row" id="presetRow"></div>
+        </div>
+        <div class="field">
+          <label class="field-label">Allowed countries (jobs outside these are dropped)</label>
+          <div class="country-grid" id="countryGrid"></div>
+        </div>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="5">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="7">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 7: Per-profile API keys (optional) -->
+      <div class="wizard-body wizard-step-body" data-step="7" style="display:none">
+        <p class="wizard-note">Optional. By default this profile uses the shared keys configured in Settings. Override here if you want this profile billed against its own accounts.</p>
+        <div class="field"><label class="field-label">Anthropic key (override)</label><input class="input" id="wzAnthropicKey" placeholder="sk-ant-…" /></div>
+        <div class="field"><label class="field-label">Apify token (override)</label><input class="input" id="wzApifyKey" placeholder="apify_api_…" /></div>
+        <div class="field"><label class="field-label">OpenAI key (for embeddings, override)</label><input class="input" id="wzOpenAIKey" placeholder="sk-…" /></div>
+        <div class="field"><label class="field-label">Resend key (for digests, override)</label><input class="input" id="wzResendKey" placeholder="re_…" /></div>
+        <div class="field"><label class="field-label">Notification email (where digests get sent for this profile)</label>
+          <input class="input" id="wzNotifyEmail" placeholder="you@example.com" /></div>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="6">← Back</button>
+          <button class="btn btn-primary" data-wizard-next="8">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 8: Review + save -->
+      <div class="wizard-body wizard-step-body" data-step="8" style="display:none">
+        <div class="wizard-summary" id="wizardSummary"></div>
+        <div class="wizard-actions">
+          <button class="btn btn-secondary" data-wizard-back="7">← Back</button>
+          <button class="btn btn-primary" id="wizardSaveBtn">Finish &amp; open dashboard →</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─── SETTINGS MODAL ─── -->
+  <div class="modal-overlay" id="settingsOverlay" style="display:none">
+    <div class="modal settings-modal">
+      <button class="modal-close" id="settingsClose">✕</button>
+      <h2>Settings</h2>
+      <p class="modal-sub">Shared API keys and tool-wide configuration. Per-profile fields (name, skills, notify email) are edited via "Manage profile" inside the profile menu.</p>
+
+      <div class="settings-section">
+        <h3>API keys</h3>
+        <div class="field">
+          <label class="field-label">Anthropic API key <span class="hint" id="hintAnthropic"></span></label>
+          <input class="input" id="setAnthropic" placeholder="sk-ant-..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Apify token <span class="hint" id="hintApify"></span></label>
+          <input class="input" id="setApify" placeholder="apify_api_..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Resend API key <span class="hint" id="hintResend"></span></label>
+          <input class="input" id="setResend" placeholder="re_..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Email "From" address (must be verified in Resend)</label>
+          <input class="input" id="setFrom" placeholder="Job Dashboard &lt;you@example.com&gt;" />
+        </div>
+        <div class="field">
+          <label class="field-label">OpenAI API key <span class="hint">(optional — enables semantic retrieval in the Brain. Without it, the brain falls back to keyword overlap.)</span></label>
+          <input class="input" id="setOpenAI" placeholder="sk-..." />
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Pipeline</h3>
+        <div class="field">
+          <label class="cron-toggle-label">
+            <input type="checkbox" id="setCronEnabled" />
+            <span><strong>Enable scheduled (cron) scraping</strong> — when off, jobs are only scraped when you click <code>Scrape Now</code>.</span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="field-label">Minimum match score (0-100). Jobs scoring below this are dropped.</label>
+          <input class="input" type="number" id="setMinScore" min="0" max="100" />
+        </div>
+        <div class="field">
+          <label class="field-label">Scrape interval (hours). Restart the server for cron to pick up changes.</label>
+          <input class="input" type="number" id="setInterval" min="1" max="168" />
+        </div>
+      </div>
+
+      <div class="settings-section" id="profileEditSection">
+        <h3>Your profile <span class="hint" id="profileEditName"></span></h3>
+
+        <p class="modal-sub" style="margin: 4px 0 12px;">All your personal information is editable here. Use the wizard for a guided edit (with toggles per field).</p>
+        <button class="btn btn-secondary" id="peOpenWizard" style="margin-bottom: 12px;">✏️ Edit full profile in setup wizard →</button>
+
+        <h4 class="settings-subhead">Resume <span class="hint" id="peResumeMeta"></span></h4>
+        <p class="modal-sub" style="margin: 4px 0 8px;">
+          Replace your stored resume text. Upload a new PDF / DOCX / TXT and Claude re-parses it (skills,
+          search titles, contact info update automatically). Or edit the raw text below.
+        </p>
+        <div class="resume-controls">
+          <input type="file" id="peResumeFile" accept=".pdf,.docx,.txt" hidden />
+          <button type="button" class="btn btn-secondary" id="peResumeUploadBtn">📄 Upload new resume…</button>
+          <span class="resume-status" id="peResumeStatus"></span>
+        </div>
+        <details class="pj-advanced" style="margin-top: 8px;">
+          <summary>Edit raw text directly (for small tweaks)</summary>
+          <textarea class="input" id="peResumeText" rows="10" placeholder="Loading…"></textarea>
+          <p class="modal-sub" style="margin-top: 4px; font-size: 11px;">
+            Saved together with the rest of Settings when you click Save settings.
+            Re-uploading a file replaces this text entirely and re-parses skills/titles.
+          </p>
+        </details>
+
+        <div class="form-grid">
+          <div class="field"><label class="field-label">Name</label><input class="input" id="peName" /></div>
+          <div class="field"><label class="field-label">Email</label><input class="input" id="peEmail" /></div>
+          <div class="field"><label class="field-label">Phone</label><input class="input" id="pePhone" /></div>
+          <div class="field"><label class="field-label">Location</label><input class="input" id="peAddress" /></div>
+          <div class="field full"><label class="field-label">LinkedIn</label><input class="input" id="peLinkedin" /></div>
+          <div class="field full"><label class="field-label">Notify email</label><input class="input" id="peNotify" /></div>
+        </div>
+
+        <h4 class="settings-subhead">Personal data (German Lebenslauf, optional under AGG)</h4>
+        <div class="form-grid">
+          <div class="field"><label class="field-label">Date of birth (DD.MM.YYYY)</label><input class="input" id="peDob" placeholder="14.03.1992" /></div>
+          <div class="field"><label class="field-label">Place of birth</label><input class="input" id="pePlaceOfBirth" /></div>
+          <div class="field"><label class="field-label">Nationality</label><input class="input" id="peNationality" /></div>
+          <div class="field"><label class="field-label">Marital status</label><input class="input" id="peMaritalStatus" /></div>
+        </div>
+
+        <h4 class="settings-subhead">Languages (CEFR)</h4>
+        <div id="peLangList"></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="peLangAdd" style="margin-bottom: 8px;">＋ Add language</button>
+
+        <h4 class="settings-subhead">Photo</h4>
+        <div class="photo-upload-row">
+          <div class="photo-preview" id="pePhotoPreview"><span class="photo-placeholder">No photo</span></div>
+          <div class="photo-actions">
+            <input type="file" id="pePhotoInput" accept="image/png,image/jpeg" hidden />
+            <button type="button" class="btn btn-secondary" id="pePhotoPickBtn">Choose photo…</button>
+            <button type="button" class="btn btn-ghost danger" id="pePhotoClearBtn" style="display:none">Remove</button>
+          </div>
+        </div>
+
+        <h4 class="settings-subhead">CV template</h4>
+        <div class="template-list" id="peTemplateList"></div>
+
+        <h4 class="settings-subhead">CV field visibility</h4>
+        <p class="modal-sub" style="margin: 4px 0 8px;">Toggle off any field you don't want to appear on the generated CV. AGG-sensitive fields (DOB, photo, marital status, nationality) default OFF.</p>
+        <div class="visibility-grid" id="peVisibility"></div>
+
+        <h4 class="settings-subhead">Per-profile API keys (optional, override the shared keys)</h4>
+        <div class="form-grid">
+          <div class="field full"><label class="field-label">Anthropic key</label><input class="input" id="peAnthropicKey" placeholder="sk-ant-…" /></div>
+          <div class="field full"><label class="field-label">Apify token</label><input class="input" id="peApifyKey" placeholder="apify_api_…" /></div>
+          <div class="field full"><label class="field-label">OpenAI key (embeddings)</label><input class="input" id="peOpenAIKey" placeholder="sk-…" /></div>
+          <div class="field full"><label class="field-label">Resend key</label><input class="input" id="peResendKey" placeholder="re_…" /></div>
+        </div>
+
+        <h4 class="settings-subhead">LinkedIn integration <span class="hint">(optional, scrape with your own account)</span></h4>
+        <div class="warning-box">
+          <strong>⚠ Risk warning.</strong> LinkedIn forbids automated scraping. Using your own session cookie risks rate limits and, in rare cases, account suspension. Skip this section to keep using the public anonymous scraper.
+        </div>
+        <details class="cookie-help">
+          <summary>How to copy your <code>li_at</code> cookie from Chrome</summary>
+          <ol>
+            <li>Open <a href="https://www.linkedin.com" target="_blank" rel="noopener">linkedin.com</a> and sign in.</li>
+            <li>Open Chrome DevTools (<code>Cmd+Opt+I</code>) → <strong>Application</strong> tab → <strong>Cookies</strong> → <code>https://www.linkedin.com</code>.</li>
+            <li>Find the row named <code>li_at</code>. Double-click its <strong>Value</strong> column and <code>Cmd+C</code>.</li>
+            <li>Paste below. The value typically starts with <code>AQED</code> and is ~200 characters.</li>
+            <li>Cookies expire every few weeks. When scrapes start failing, repeat these steps.</li>
+          </ol>
+        </details>
+        <div class="field full">
+          <label class="field-label">LinkedIn <code>li_at</code> cookie value</label>
+          <input class="input" id="peLinkedInCookie" placeholder="AQED…" autocomplete="off" />
+          <div class="li-test-row">
+            <button type="button" class="btn btn-secondary btn-sm" id="peLinkedInTestBtn">🔌 Test connection</button>
+            <span class="li-test-result" id="peLinkedInTestResult"></span>
+          </div>
+        </div>
+
+        <h4 class="settings-subhead">Apify actor IDs <span class="hint">(advanced — leave empty to use defaults)</span></h4>
+        <p class="modal-sub" style="margin: 4px 0 8px;">
+          The <code>bebity</code> default for cookie-based LinkedIn scraping is a paid actor on Apify.
+          If your Apify token gets <code>403 Forbidden</code> errors during scrapes, either rent it on
+          <a href="https://apify.com/bebity/linkedin-jobs-scraper" target="_blank" rel="noopener">apify.com/bebity/linkedin-jobs-scraper</a>
+          or paste a different actor's ID below.
+        </p>
+        <div class="form-grid">
+          <div class="field full"><label class="field-label">LinkedIn (anonymous, public) <span class="hint">default: valig~linkedin-jobs-scraper</span></label>
+            <input class="input" id="setLinkedInActorPublic" placeholder="valig~linkedin-jobs-scraper" /></div>
+          <div class="field full"><label class="field-label">LinkedIn (cookie-based, paid) <span class="hint">default: bebity~linkedin-jobs-scraper</span></label>
+            <input class="input" id="setLinkedInActorAuth" placeholder="bebity~linkedin-jobs-scraper" /></div>
+          <div class="field full"><label class="field-label">Indeed <span class="hint">default: valig~indeed-jobs-scraper</span></label>
+            <input class="input" id="setIndeedActor" placeholder="valig~indeed-jobs-scraper" /></div>
+        </div>
+
+        <h4 class="settings-subhead">Search titles &amp; countries</h4>
+        <div class="field">
+          <label class="field-label">Search titles (comma-separated)</label>
+          <input class="input" id="peSearchTitles" />
+        </div>
+        <div class="field">
+          <label class="field-label">Allowed countries</label>
+          <div class="country-grid" id="peCountryGrid"></div>
+        </div>
+
+        <div class="settings-row danger-row">
+          <button class="btn btn-ghost danger" id="peDelete">🗑 Delete this profile</button>
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn btn-secondary" id="settingsCancel">Cancel</button>
+        <button class="btn btn-primary" id="settingsSave">Save settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── PASTE-A-JOB MODAL ─── -->
+  <div class="modal-overlay" id="pasteJobOverlay" style="display:none">
+    <div class="modal paste-job-modal">
+      <button class="modal-close" id="pasteJobClose">✕</button>
+      <h2>Paste a Job</h2>
+      <p class="modal-sub">
+        Copy the entire LinkedIn / careers-page job — title, company, location, JD,
+        apply link, all of it. Paste below. Claude pulls out the structured fields
+        automatically. No need to fill anything separately.
+      </p>
+
+      <div class="field">
+        <div class="pj-jd-tabs" id="pjJdTabs">
+          <button type="button" class="pj-jd-tab active" data-jd-tab="original">Original</button>
+          <button type="button" class="pj-jd-tab" data-jd-tab="translated" id="pjJdTabTranslated" style="display:none">Translation</button>
+          <button type="button" class="pj-jd-translate-btn" id="pjJdTranslateBtn">🌐 Translate</button>
+        </div>
+        <textarea class="input" id="pjRawText" rows="14" placeholder="Cmd-A and Cmd-C on the LinkedIn job page, then Cmd-V here. Don't worry about cleaning it up — Claude drops the UI chrome and pulls out title, company, location, apply URL, and the clean JD body."></textarea>
+        <textarea class="input" id="pjDescriptionTranslated" rows="14" style="display:none" readonly></textarea>
+      </div>
+
+      <!-- Optional advanced overrides — hidden by default. Open this only if
+           Claude's parse misses something. Anything filled here overrides
+           Claude's extracted values. -->
+      <details class="pj-advanced">
+        <summary>Show advanced fields (optional overrides)</summary>
+        <div class="form-grid">
+          <div class="field"><label class="field-label">Role title</label>
+            <input class="input" id="pjTitle" placeholder="(auto-extracted)" /></div>
+          <div class="field"><label class="field-label">Company</label>
+            <input class="input" id="pjCompany" placeholder="(auto-extracted)" /></div>
+          <div class="field"><label class="field-label">Location</label>
+            <input class="input" id="pjLocation" placeholder="(auto-extracted)" /></div>
+          <div class="field"><label class="field-label">Apply URL</label>
+            <input class="input" id="pjApplyUrl" placeholder="(auto-extracted)" /></div>
+        </div>
+        <div class="field">
+          <label class="field-label">Cleaned job description (override)</label>
+          <textarea class="input" id="pjDescription" rows="6" placeholder="Leave empty to use Claude's parse"></textarea>
+        </div>
+      </details>
+
+      <div class="paste-job-result" id="pjResult"></div>
+
+      <div class="settings-actions">
+        <button class="btn btn-secondary" id="pasteJobCancel">Cancel</button>
+        <button class="btn btn-primary" id="pasteJobSubmit">Analyse &amp; store →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── MATCH EXPLAIN OVERLAY ─── -->
+  <div class="modal-overlay" id="matchExplainOverlay" style="display:none">
+    <div class="modal match-explain-modal">
+      <button class="modal-close" id="matchExplainClose">✕</button>
+      <h2 id="matchExplainTitle">Why this match score?</h2>
+      <p class="modal-sub" id="matchExplainMeta"></p>
+      <div class="match-explain-body" id="matchExplainBody">
+        <div class="bullet-popover-loading">Analysing the JD against your CV…</div>
+      </div>
+      <div class="settings-actions">
+        <button class="btn btn-ghost" id="matchExplainRefresh" title="Re-run Claude analysis (ignores cache)">🔄 Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── BULLET EDITOR OVERLAY ─── -->
+  <div class="modal-overlay" id="bulletEditorOverlay" style="display:none">
+    <div class="modal bullet-editor-modal">
+      <button class="modal-close" id="bulletEditorClose">✕</button>
+      <h2>Edit Bullets</h2>
+      <p class="modal-sub">
+        Click any bullet to see 4 alternative phrasings, your past bullets from the brain, or type your own. Changes update the CV PDF immediately.
+      </p>
+      <div class="bullet-editor-meta">
+        <span class="lang-tabs" id="bulletEditorLangTabs"></span>
+      </div>
+      <div class="bullet-editor-body" id="bulletEditorBody"></div>
+    </div>
+  </div>
+
+  <script src="profile_ui.js"></script>
+  <script src="app.js"></script>
+  <script src="brain_ui.js"></script>
+  <script src="paste_job_ui.js"></script>
+  <script src="bullet_editor_ui.js"></script>
+  <script src="match_explain_ui.js"></script>
+  <script src="draft_view.js"></script>
+</body>
+</html>
