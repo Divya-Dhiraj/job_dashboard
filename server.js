@@ -1165,6 +1165,75 @@ app.post('/api/applications/:id/bullet-suggestions', async (req, res) => {
   });
 });
 
+// Find the original passage(s) in the candidate's resume that a tailored
+// bullet was derived from. The generator routinely shortens the source
+// resume (a 3-line accomplishment becomes a 12-word bullet); this lets
+// the user recover the unabridged version when the trim went too far.
+//
+// Body: { bullet: "<the tailored bullet text>" }
+// Returns: { excerpts: [string], reasoning: "<short>" }
+app.post('/api/applications/:id/bullet-source', async (req, res) => {
+  const app = db.getApplicationById(+req.params.id);
+  if (!app) return res.status(404).json({ error: 'Application not found' });
+  const profile = app.profile_id ? db.getProfile(app.profile_id) : db.getActiveProfile();
+  const bullet = String(req.body?.bullet || '').trim();
+  if (!bullet) return res.status(400).json({ error: 'bullet text is required' });
+
+  const resumeText = String(profile?.resume_text || '').trim();
+  if (!resumeText) return res.status(400).json({ error: 'No resume on file for this profile' });
+
+  try {
+    const Anthropic = require('@anthropic-ai/sdk');
+    const MODELS = require('./models');
+    const anthropicKey = (profile && profile.anthropic_key_override) ||
+      db.getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY;
+    if (!anthropicKey) throw new Error('Anthropic API key not configured');
+    const client = new Anthropic({ apiKey: anthropicKey });
+
+    const sys = `You match a tailored CV bullet back to the candidate's original resume to recover its source.
+
+Output ONLY valid JSON, no markdown fences:
+{
+  "excerpts": ["<verbatim sentence or paragraph from the resume that this bullet was derived from>", "..."],
+  "reasoning": "<one short sentence explaining the connection>"
+}
+
+RULES:
+- Quote the resume verbatim. Do NOT paraphrase.
+- Return 1-3 excerpts. Prefer one strong match over many weak ones.
+- Each excerpt should be a complete sentence or short paragraph (~15-60 words). Don't return bare fragments.
+- If nothing in the resume clearly maps to this bullet, return excerpts: [] and explain in reasoning.
+- Don't include the role title / company name unless they were the part that was shortened.`;
+
+    const r = await client.messages.create({
+      model: MODELS.auxiliary,        // source recovery — straightforward extraction, Haiku
+      max_tokens: 1000,
+      system: [{ type: 'text', text: sys, cache_control: { type: 'ephemeral' } }],
+      messages: [{
+        role: 'user',
+        content: `Candidate's full resume:
+${resumeText}
+
+Tailored bullet to find the source for:
+"${bullet}"
+
+Return the JSON now.`,
+      }],
+    });
+    const raw = r.content[0]?.text || '';
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return res.json({ excerpts: [], reasoning: 'Source-finder returned no JSON.' });
+    const parsed = JSON.parse(m[0]);
+    res.json({
+      excerpts: Array.isArray(parsed.excerpts) ? parsed.excerpts.filter(s => typeof s === 'string').slice(0, 5) : [],
+      reasoning: String(parsed.reasoning || '').trim(),
+    });
+  } catch (err) {
+    console.error('[Bullet-source] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Generic field updater — used by the inline edit affordance in the
 // draft view. Body: {language, path, value}. Path is a dotted-segment
 // path into the CV payload (e.g. "cv.name", "cv.experience.0.title",

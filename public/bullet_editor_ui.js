@@ -195,7 +195,59 @@
       container.appendChild(sec);
     }
 
-    // Section 3: Manual input
+    // Section 3: Original passage from the resume — collapsed by default,
+    // fetched on demand. Useful when the generator trimmed too aggressively
+    // and the user wants to recover the unabridged version.
+    {
+      const sec = document.createElement('div');
+      sec.className = 'bullet-popover-section';
+      sec.innerHTML = `
+        <h4>From your resume <span class="bs-meta" style="font-weight:400;">(unshortened original)</span></h4>
+        <button type="button" class="btn btn-ghost bs-show-source" style="font-size:12px; padding:4px 10px;">Show original passage</button>
+        <div class="bs-source-results" style="margin-top:6px;"></div>`;
+      const showBtn = sec.querySelector('.bs-show-source');
+      const results = sec.querySelector('.bs-source-results');
+      showBtn.onclick = async () => {
+        showBtn.disabled = true;
+        showBtn.textContent = 'Searching your resume…';
+        try {
+          const r = await fetch(`/api/applications/${appId}/bullet-source`, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bullet: data.current_bullet || '' }),
+          });
+          if (!r.ok) throw new Error((await r.json()).error || 'lookup failed');
+          const out = await r.json();
+          showBtn.style.display = 'none';
+          results.innerHTML = '';
+          if (!out.excerpts?.length) {
+            results.innerHTML = `<div class="brain-empty" style="font-size:12px;">${escapeHtml(out.reasoning || 'No clear match in the resume for this bullet.')}</div>`;
+            return;
+          }
+          out.excerpts.forEach(ex => {
+            const row = document.createElement('div');
+            row.className = 'bullet-suggestion';
+            row.innerHTML = `<div class="bs-text">${escapeHtml(ex)}<div class="bs-meta">click to use as bullet</div></div>`;
+            row.onclick = () => apply(ex);
+            results.appendChild(row);
+          });
+          if (out.reasoning) {
+            const note = document.createElement('div');
+            note.className = 'bs-meta';
+            note.style.cssText = 'margin-top:4px; font-size:11px;';
+            note.textContent = out.reasoning;
+            results.appendChild(note);
+          }
+        } catch (e) {
+          showBtn.disabled = false;
+          showBtn.textContent = 'Show original passage';
+          results.innerHTML = `<div class="brain-empty" style="font-size:12px;">Lookup failed: ${escapeHtml(e.message)}</div>`;
+        }
+      };
+      container.appendChild(sec);
+    }
+
+    // Section 4: Manual input
     const sec = document.createElement('div');
     sec.className = 'bullet-popover-section';
     sec.innerHTML = `<h4>Type your own</h4>

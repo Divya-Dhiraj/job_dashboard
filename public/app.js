@@ -14,7 +14,85 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshAll();
   bindEvents();
   startAutoRefresh();
+  renderRecentDrawer();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recent generations drawer
+//
+// Persists last N generated applications in localStorage so the user can
+// re-open them in one click after closing the tab / browser. The drawer
+// pins to the top of the dashboard and survives across sessions on the
+// same machine. Each entry stores enough to re-open the preview modal
+// without a server round-trip for metadata.
+// ─────────────────────────────────────────────────────────────────────────────
+const RECENT_KEY = 'jobDashboard:recentApps:v1';
+const RECENT_MAX = 5;
+
+function readRecentApps() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]') || []; }
+  catch { return []; }
+}
+function writeRecentApps(arr) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(arr)); }
+  catch { /* localStorage full or disabled — silently ignore */ }
+}
+function pushRecentApp(entry) {
+  if (!entry || !entry.id) return;
+  const list = readRecentApps().filter(e => e.id !== entry.id);
+  list.unshift({
+    id: entry.id,
+    company: entry.company || 'Unknown',
+    role: entry.role || 'Unknown',
+    location: entry.location || '',
+    job_url: entry.job_url || entry.apply_url || '',
+    job_id: entry.job_id || '',
+    job_description: entry.job_description || '',
+    saved_at: new Date().toISOString(),
+  });
+  writeRecentApps(list.slice(0, RECENT_MAX));
+  renderRecentDrawer();
+}
+function removeRecentApp(id) {
+  writeRecentApps(readRecentApps().filter(e => e.id !== id));
+  renderRecentDrawer();
+}
+
+function renderRecentDrawer() {
+  const drawer = $('recentDrawer');
+  const items  = $('recentDrawerItems');
+  if (!drawer || !items) return;
+  const list = readRecentApps();
+  if (!list.length) { drawer.style.display = 'none'; return; }
+  drawer.style.display = '';
+  items.innerHTML = '';
+  for (const e of list) {
+    const chip = document.createElement('span');
+    chip.className = 'recent-chip';
+    chip.title = `${e.role} — ${e.company} (saved ${fmtDate(e.saved_at)})`;
+    chip.innerHTML = `
+      <span class="rc-co">${esc(e.company)}</span>
+      <span class="rc-role">· ${esc(e.role.length > 28 ? e.role.slice(0, 28) + '…' : e.role)}</span>
+      <span class="rc-x" title="Remove from recent">×</span>
+    `;
+    chip.addEventListener('click', (ev) => {
+      if (ev.target.classList.contains('rc-x')) {
+        ev.stopPropagation();
+        removeRecentApp(e.id);
+        return;
+      }
+      // Re-open the preview modal. We have everything we need cached.
+      const job = {
+        id: e.job_id, title: e.role, company: e.company,
+        location: e.location, apply_url: e.job_url,
+        description: e.job_description,
+      };
+      openPreviewModal(e.id, job);
+    });
+    items.appendChild(chip);
+  }
+}
+window.pushRecentApp = pushRecentApp;
 
 // Exposed for profile_ui.js to call when the active profile changes.
 // Reloads the dashboard data without a full page refresh.
@@ -494,6 +572,14 @@ async function handleGenerate() {
     // before they close the tab. The server still keeps the files (DB row
     // points at the folder), so this is belt-and-braces, not the only copy.
     triggerApplicationDownload(data.id);
+    // Pin this generation to the Recent drawer so re-opening it is one
+    // click after the tab is closed.
+    pushRecentApp({
+      id: data.id,
+      company: job.company, role: job.title, location: job.location,
+      job_id: job.id, job_url: job.apply_url || '',
+      job_description: job.description || '',
+    });
   } catch (err) {
     $('generatingOverlay').classList.remove('open');
     document.body.style.overflow = '';
@@ -786,6 +872,14 @@ async function viewApplication(appId) {
       location: app.location, apply_url: app.job_url, description: app.job_description,
     };
     openPreviewModal(appId, job);
+    // Promote this one to Recent — even old apps the user revisits
+    // should be one click away next time.
+    pushRecentApp({
+      id: appId,
+      company: app.company, role: app.role, location: app.location,
+      job_id: app.job_id, job_url: app.job_url || '',
+      job_description: app.job_description || '',
+    });
   } catch (err) { showToast('Error: ' + err.message, true); }
 }
 

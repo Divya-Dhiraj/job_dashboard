@@ -111,6 +111,15 @@
     </div>
   </section>
 
+  <!-- ─── RECENT DRAWER ─── -->
+  <!-- Persistent strip showing the last 5 generations across sessions.
+       Backed by localStorage so it survives tab close, browser restart,
+       and server re-deploy. Clicking a chip re-opens the preview modal. -->
+  <section class="recent-drawer" id="recentDrawer" style="display:none;">
+    <span class="recent-drawer-label">📌 Recent:</span>
+    <div class="recent-drawer-items" id="recentDrawerItems"></div>
+  </section>
+
   <!-- ─── MAIN CONTENT ─── -->
   <main class="main">
 
